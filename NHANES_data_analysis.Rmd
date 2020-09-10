@@ -1,0 +1,1722 @@
+---
+title: "3: NHANES Data Analysis"
+date: "15/06/2020"
+output:
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## 0: Data Preparation
+
+Load relevant packages:
+
+```{r packages, message = FALSE, warning=FALSE}
+library(nhanesA)
+library(skimr)
+library(mstate)
+library(cmprsk)
+library(gridExtra)
+library(finalfit)
+library(tidyverse)
+library(ggplot2)
+```
+
+In this data analysis, the NHANES 2005-2006 data was used [1], as well as the 2015 Linked Mortality File (LMF) [2] which is contained in the file `outcome.csv'.
+
+
+
+## Import NHANES tables
+
+To import the NHANES 2005-2006 tables, a tutorial by C.Endres was followed [3].
+
+Import age and gender from demographic table.
+
+```{r}
+demo_d  <- nhanes('DEMO_D') %>% select('SEQN', 'RIDAGEYR', 'RIAGENDR') %>% mutate(RIAGENDR = factor(RIAGENDR))
+
+```
+
+No missing data, 1= male, 2 = female, age between 0 and 85 (all above 84 given 85)
+
+
+Load body measurement data
+
+```{r}
+bmx_d  <- nhanes('BMX_D') %>% select('SEQN', 'BMXBMI')
+
+data0 <- merge(demo_d, bmx_d, by = 'SEQN')
+
+```
+
+About 10% BMI data is missing.
+
+
+
+Load blood pressure measurements :
+
+Systolic blood pressure mmHg 1st reading
+```{r}
+systolic  <- nhanes('BPX_D') %>% select('SEQN', 'BPXSY1')
+
+```
+
+
+Lab measurements for cholesterol levels:
+
+```{r}
+ldl <- nhanes('TRIGLY_D') %>% select('SEQN', 'LBDLDL')
+
+data1 <- merge(data0, ldl, by = 'SEQN')
+
+```
+
+Load questionnare diabetes data:
+
+```{r}
+# Ever told by doctor you have diabetes?
+diq_d <- nhanes('DIQ_D') %>% select('SEQN', 'DIQ010') %>% mutate(DIQ010 = factor(DIQ010))
+
+diabetes_d <- nhanesTranslate('DIQ_D', 'DIQ010', data=diq_d)
+
+data2 <- merge(data1, diabetes_d, by = 'SEQN')
+
+
+
+
+# Cigarette use questionnaire data
+# Smoked at least 100 cigarettes in life?
+
+smq_d <- nhanes('SMQ_D') %>% select('SEQN', 'SMQ020') %>% mutate(SMQ020 = factor(SMQ020))
+
+smoke_d <- nhanesTranslate('SMQ_D', 'SMQ020', data=smq_d)
+
+data3 <- merge(data2, smoke_d)
+
+data4 <- merge(data3, systolic)
+
+covariates <- nhanesTranslate('DEMO_D', 'RIAGENDR', data=data4)
+
+
+summary(covariates)
+
+skim(covariates)
+
+```
+
+
+
+
+## Load mortality data
+
+
+```{r}
+outcome = read_csv('outcome.csv') %>% select(-'X1')
+
+
+# Convert data types
+data <- merge(covariates, outcome, by = 'SEQN') %>% mutate(SEQN = factor(SEQN)) %>%
+  mutate(eligstat = factor(eligstat), 
+         mortstat = factor(mortstat),
+         ucod_leading = factor(ucod_leading), 
+         permth_int = as.numeric(permth_int),
+         permth_exm = as.numeric(permth_exm),
+         RIDAGEYR = as.numeric(RIDAGEYR),
+         RIAGENDR = factor(RIAGENDR),
+         BMXBMI = as.numeric(BMXBMI),
+         LBDLDL = as.numeric(LBDLDL),
+         DIQ010 = factor(DIQ010),
+         BPXSY1 = as.numeric(BPXSY1),
+         SMQ020 = factor(SMQ020))
+
+summary(data)
+
+skim(data)
+```
+
+
+## Data checks and exploration
+
+```{r}
+ggplot(data, aes(x = mortstat, y = RIDAGEYR)) + geom_boxplot()
+
+ggplot(data, aes(x = mortstat, y = BMXBMI)) + geom_boxplot()
+
+ggplot(data, aes(x = mortstat, y = LBDLDL)) + geom_boxplot()
+
+ggplot(data, aes(x = mortstat, y = BPXSY1)) + geom_boxplot()
+```
+
+
+### Change data format
+
+Change format of ucod_leading so that :
+
+- 0 = Ineligible, under age 18, assumed alive, or no cause of death data 
+- 1 = death from disease of the heart
+- 2 = maligant neoplasms (cancer)
+- 3 = all other causes e.g. accidents, respiratory, diabetes etc.
+
+
+```{r}
+# First convert 0s to NA's
+summary(data$ucod_leading)
+levels(data$ucod_leading)
+levels(data$ucod_leading) <- c(levels(data$ucod_leading),"0")
+
+data$ucod_leading[is.na(data$ucod_leading)] <- 0 
+summary(data$ucod_leading)
+
+
+# Convert 3-10 to 3
+cause <- data.frame(ucod_leading=c(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10), cause =c(0, 1, 2, 3, 3, 3, 3, 3, 3, 3, 3))
+df2 <- merge(data,cause, by = 'ucod_leading') %>% 
+  mutate(SEQN = factor(SEQN),
+         eligstat = factor(eligstat), 
+         mortstat = factor(mortstat),
+         ucod_leading = factor(ucod_leading), 
+         permth_int = as.numeric(permth_int),
+         permth_exm = as.numeric(permth_exm),
+         RIDAGEYR = as.numeric(RIDAGEYR)/10,
+         RIAGENDR = factor(RIAGENDR),
+         BMXBMI = as.numeric(BMXBMI),
+         LBDLDL = as.numeric(LBDLDL)/10,
+         DIQ010 = factor(DIQ010),
+         BPXSY1 = as.numeric(BPXSY1)/10,
+         SMQ020 = factor(SMQ020),
+         cause = factor(cause))
+
+
+                    
+summary(df2)
+
+```
+
+## Data in long format for mstate
+
+Convert data into long format with K rows per individual 
+
+```{r}
+
+head(df2)
+
+data_short <- df2 %>% 
+  select(-c(permth_int, mortstat, eligstat, ucod_leading)) %>%
+  rename(time = permth_exm, status = cause)
+
+
+causes <- data.frame(status=c(0, 1, 2, 3), cause = c("event-free", "heart", "cancer", "other"))
+
+data_short <- merge(data_short, causes, by = "status")
+head(data_short)
+
+# Individuals with missing time are inelidgible or under 18
+summary(data_short$time)
+
+# Remove ineligible individuals
+data_short <- data_short[!is.na(data_short$time), ]
+
+# Remove individuals with missing covariates
+data_short <- na.omit(data_short) 
+
+# Remove individuals in 'Don't know' categories
+data_short <- data_short %>% 
+  filter(!(DIQ010 == "Don't know" | SMQ020 == "Don't know"))
+
+
+data_short$DIQ010 <- droplevels(data_short$DIQ010, exclude = "Don't know")
+data_short$SMQ020 <- droplevels(data_short$SMQ020, exclude = "Don't know")
+
+
+# Reorder
+data_short <- data_short %>% select(SEQN, time, status, cause, RIAGENDR, RIDAGEYR, BMXBMI, LBDLDL, DIQ010, BPXSY1, SMQ020) %>% mutate(SEQN = as.integer(SEQN))
+
+#Order factor levels to make output easier to read
+data_short$DIQ010 = factor(data_short$DIQ010 ,
+                    levels=c("No", "Borderline", "Yes"))
+
+data_short$SMQ020 = factor(data_short$SMQ020 ,
+                    levels=c("No", "Yes"))
+                  
+
+summary(data_short)
+skim(data_short)
+
+```
+
+```{r}
+# Check correlation between covariates:
+
+round(cor(data_short %>% select(-c(time, SEQN, DIQ010, SMQ020, RIAGENDR, cause, status))), 2)
+```
+Systolic blood pressure appears to be positively correlated with BMI, and age.
+
+
+
+
+The code below estimating the Cox model regression coefficients and the cumulative incidence for a given covariate using the `mstate` package has been adapted from a tutorial by H.Putter [4].
+
+```{r}
+# Number of each event:
+table(data_short$status)
+
+
+# Competing risk transition matrix
+tmat <- trans.comprisk(3, names = c("event-free", "heart", "cancer", "other"))
+tmat
+
+# Can only go from event free to one of the K=3 causes
+```
+
+```{r}
+# Indicator columns for each of the 3 causes of deaths
+data_short$stat1 <- as.numeric(data_short$status == 1) 
+data_short$stat2 <- as.numeric(data_short$status == 2)
+data_short$stat3 <- as.numeric(data_short$status == 3) 
+
+head(data_short)
+
+# Convert data into long format using msprep:
+data_long <- msprep(time = c(NA, "time", "time", "time"), status = c(NA, "stat1", "stat2", "stat3"), data = data_short, keep = c("RIDAGEYR", "RIAGENDR", "BMXBMI", "LBDLDL", "DIQ010", "BPXSY1", "SMQ020"), trans = tmat)
+
+tail(data_long)
+```
+
+```{r}
+# Check number of events same as before:
+events(data_long)
+
+
+# Add cause-specific covariates for regression:
+data_long <- expand.covs(data_long, covs = c("RIDAGEYR","RIAGENDR","BMXBMI","LBDLDL", "DIQ010", "BPXSY1", "SMQ020"))
+
+head(data_long)
+
+```
+
+
+# Non-parametric estimators for cumulative incidence
+
+
+
+## Aalen-Johanssen Estimator
+
+```{r}
+ci <- Cuminc(time = "time", status = "status", data = data_short)
+
+head(ci)
+
+# Plot
+ggplot(ci) + 
+      geom_step(aes(x = time, y = CI.1, color = 'Heart')) +
+      geom_step(aes(x = time, y = CI.2, color = 'Cancer')) + 
+  geom_step(aes(x = time, y = CI.3, color = 'Other')) + 
+  labs(title = 'Aalen-Johanssen Estimator Cumulative Incidence function') + xlab('Months of follow up') + ylab('Probability') + ylim(0,0.1) +
+scale_colour_manual(name="Cause of death",
+    values=c(Heart="red", Cancer="blue", Other = "green"))
+```
+
+
+
+# 1: Cox model 
+
+
+```{r}
+
+# Stratified hazards model
+c1 <- coxph(Surv(time, status) ~ RIDAGEYR.1 + RIDAGEYR.2 +  RIDAGEYR.3  + RIAGENDRFemale.1 + RIAGENDRFemale.2 + RIAGENDRFemale.3  + BMXBMI.1 + BMXBMI.2 + BMXBMI.3  + LBDLDL.1 + LBDLDL.2 + LBDLDL.3 + DIQ010Borderline.1 + DIQ010Borderline.2 + DIQ010Borderline.3 + DIQ010Yes.1 + DIQ010Yes.2 + DIQ010Yes.3 + BPXSY1.1 + BPXSY1.2 + BPXSY1.3 + SMQ020Yes.1 + SMQ020Yes.2 + SMQ020Yes.3 + strata(trans), data = data_long)
+
+
+summary(c1)
+```
+
+### Using just coxph()
+```{r}
+# Alternative method using just coxph()
+
+coxph(Surv(time,status==1)~  RIDAGEYR + RIAGENDR + BMXBMI + LBDLDL + DIQ010 + BPXSY1 + SMQ020, data = data_short)
+
+# Gives same results
+```
+
+
+### Get predicted Cumulative incidence using mstate package
+
+```{r}
+par(mfrow = c(1, 3))
+
+c1 <- coxph(Surv(time, status) ~ RIDAGEYR.1 + RIDAGEYR.2 +  RIDAGEYR.3  + RIAGENDRFemale.1 + RIAGENDRFemale.2 + RIAGENDRFemale.3  + BMXBMI.1 + BMXBMI.2 + BMXBMI.3  + LBDLDL.1 + LBDLDL.2 + LBDLDL.3 + DIQ010Borderline.1 + DIQ010Borderline.2 + DIQ010Borderline.3 + DIQ010Yes.1 + DIQ010Yes.2 + DIQ010Yes.3 + BPXSY1.1 + BPXSY1.2 + BPXSY1.3 + SMQ020Yes.1 + SMQ020Yes.2 + SMQ020Yes.3 + strata(trans), data = data_long, method = 'breslow')
+
+
+# New data for individual with average covariate values and factors 
+
+# Compare incidence of each outcome for males and females, both BMI 28.8, LDL 115md/dL, aged 48, systolic blood pressure 124mmHg, with no diabetes and not smoked more than 100 cigarettes in lifetime
+Male <- data.frame(RIDAGEYR.1 = c(4.8,0,0), RIDAGEYR.2 = c(0,4.8,0), RIDAGEYR.3 = c(0,0,4.8), RIAGENDRFemale.1 = c(0,0,0), RIAGENDRFemale.2 = c(0,0,0), RIAGENDRFemale.3 = c(0,0,0), BMXBMI.1 = c(28.8, 0,0 ), BMXBMI.2 = c( 0,28.8,0 ), BMXBMI.3 = c( 0,0,28.8), LBDLDL.1 = c(11.5,0 ,0 ), LBDLDL.2 = c( 0,11.5,0 ), LBDLDL.3 = c( 0,0 ,11.5), DIQ010Borderline.1 = c(0 ,0 ,0 ), DIQ010Borderline.2 = c(0 ,0 ,0 ), DIQ010Borderline.3 = c(0 ,0 ,0 ), DIQ010Yes.1 =c(0 ,0 ,0 ), DIQ010Yes.2 = c(0 ,0 ,0 ), DIQ010Yes.3 = c(0 ,0 ,0 ), BPXSY1.1 = c(12.4,0,0), BPXSY1.2 =c(0,12.4,0), BPXSY1.3 = c(0,0,12.4), SMQ020Yes.1 = c(0,0,0), SMQ020Yes.2 = c(0,0,0), SMQ020Yes.3 = c(0,0,0), trans = c(1, 2, 3), strata = c(1, 2, 3))
+
+Female <- data.frame(RIDAGEYR.1 = c(4.8,0,0), RIDAGEYR.2 = c(0,4.8,0), RIDAGEYR.3 = c(0,0,4.8), RIAGENDRFemale.1 = c(1,0,0), RIAGENDRFemale.2 = c(0,1,0), RIAGENDRFemale.3 = c(0,0,1), BMXBMI.1 = c(28.8, 0,0 ), BMXBMI.2 = c( 0,28.8,0 ), BMXBMI.3 = c( 0,0,28.8), LBDLDL.1 = c(11.5,0 ,0 ), LBDLDL.2 = c( 0,11.5,0 ), LBDLDL.3 = c( 0,0 ,11.5), DIQ010Borderline.1 = c(0 ,0 ,0 ), DIQ010Borderline.2 = c(0 ,0 ,0 ), DIQ010Borderline.3 = c(0 ,0 ,0 ), DIQ010Yes.1 =c(0 ,0 ,0 ), DIQ010Yes.2 = c(0 ,0 ,0 ), DIQ010Yes.3 = c(0 ,0 ,0 ), BPXSY1.1 = c(12.4,0,0), BPXSY1.2 =c(0,12.4,0), BPXSY1.3 = c(0,0,12.4), SMQ020Yes.1 = c(0,0,0), SMQ020Yes.2 = c(0,0,0), SMQ020Yes.3 = c(0,0,0), trans = c(1, 2, 3), strata = c(1, 2, 3))
+
+
+# Estimated cumulative hazards for all event times
+msf.Male <- msfit(c1, Male, trans = tmat)
+msf.Female <- msfit(c1, Female, trans = tmat)
+
+
+
+# Caluculates Cumulative Incidence
+pt.Male <- probtrans(msf.Male, 0)[[1]]
+
+
+pt.Female <- probtrans(msf.Female, 0)[[1]]
+#pt.Female
+
+
+# Plot
+
+# Heart disease
+plot11 <- ggplot(NULL, aes(x = time, y = pstate2)) + 
+      geom_step(data = pt.Male, aes(color = 'Male')) +
+      geom_step(data = pt.Female, aes(color = 'Female')) + labs(title = 'Heart disease') + xlab('Months of follow up') + ylab('Probability') + ylim(0,0.1) +
+scale_colour_manual(name="Gender",
+    values=c(Male="red", Female="blue"))
+
+# Cancer
+
+plot12 <- ggplot(NULL, aes(x = time, y = pstate3)) + 
+      geom_step(data = pt.Male, aes(color = 'Male')) +
+      geom_step(data = pt.Female, aes(color = 'Female')) + labs(title = 'Cancer') + xlab('Months of follow up') + ylab('Probability') + ylim(0,0.1) +
+scale_colour_manual(name="Gender",
+    values=c(Male="red", Female="blue"))
+
+
+# Other causes
+
+plot13 <- ggplot(NULL, aes(x = time, y = pstate4)) + 
+      geom_step(data = pt.Male, aes(color = 'Male')) +
+      geom_step(data = pt.Female, aes(color = 'Female')) + labs(title = 'Other causes') + xlab('Months of follow up') + ylab('Probability') + ylim(0,0.1) +
+scale_colour_manual(name="Gender",
+    values=c(Male="red", Female="blue"))
+
+grid.arrange(plot11, plot12, plot13, nrow=1, ncol=3)
+
+
+
+
+
+### Smoking
+
+# Compare incidence of each outcome for those who have smoked more than 100 cigarettes in life with those who haven't, both BMI 23,male, LDL 90md/dL, aged 45, systolic blood pressure 110mmHg, with no diabetes
+Smoke <- data.frame(RIDAGEYR.1 = c(4.5,0,0), RIDAGEYR.2 = c(0,4.5,0), RIDAGEYR.3 = c(0,0,4.5), RIAGENDRFemale.1 = c(0,0,0), RIAGENDRFemale.2 = c(0,0,0), RIAGENDRFemale.3 = c(0,0,0), BMXBMI.1 = c(23, 0,0 ), BMXBMI.2 = c( 0,23,0 ), BMXBMI.3 = c( 0,0,23), LBDLDL.1 = c(9,0 ,0 ), LBDLDL.2 = c( 0,9,0 ), LBDLDL.3 = c( 0,0 ,9), DIQ010Borderline.1 = c(0 ,0 ,0 ), DIQ010Borderline.2 = c(0 ,0 ,0 ), DIQ010Borderline.3 = c(0 ,0 ,0 ), DIQ010Yes.1 =c(0 ,0 ,0 ), DIQ010Yes.2 = c(0 ,0 ,0 ), DIQ010Yes.3 = c(0 ,0 ,0 ), BPXSY1.1 = c(11,0,0), BPXSY1.2 =c(0,11,0), BPXSY1.3 = c(0,0,11), SMQ020Yes.1 = c(1,0,0), SMQ020Yes.2 = c(0,1,0), SMQ020Yes.3 = c(0,0,1), trans = c(1, 2, 3), strata = c(1, 2, 3))
+
+Not_smoked  <- data.frame(RIDAGEYR.1 = c(4.5,0,0), RIDAGEYR.2 = c(0,4.5,0), RIDAGEYR.3 = c(0,0,4.5), RIAGENDRFemale.1 = c(0,0,0), RIAGENDRFemale.2 = c(0,0,0), RIAGENDRFemale.3 = c(0,0,0), BMXBMI.1 = c(23, 0,0 ), BMXBMI.2 = c( 0,23,0 ), BMXBMI.3 = c( 0,0,23), LBDLDL.1 = c(9,0 ,0 ), LBDLDL.2 = c( 0,9,0 ), LBDLDL.3 = c( 0,0 ,9), DIQ010Borderline.1 = c(0 ,0 ,0 ), DIQ010Borderline.2 = c(0 ,0 ,0 ), DIQ010Borderline.3 = c(0 ,0 ,0 ), DIQ010Yes.1 =c(0 ,0 ,0 ), DIQ010Yes.2 = c(0 ,0 ,0 ), DIQ010Yes.3 = c(0 ,0 ,0 ), BPXSY1.1 = c(11,0,0), BPXSY1.2 =c(0,11,0), BPXSY1.3 = c(0,0,11), SMQ020Yes.1 = c(0,0,0), SMQ020Yes.2 = c(0,0,0), SMQ020Yes.3 = c(0,0,0), trans = c(1, 2, 3), strata = c(1, 2, 3))
+
+
+# Estimated cumulative hazards for all event times
+msf.Smoke <- msfit(c1, Smoke, trans = tmat)
+msf.Not_smoked <- msfit(c1, Not_smoked, trans = tmat)
+
+
+# Caluculates Cumulative Incidence
+pt.Smoke <- probtrans(msf.Smoke, 0)[[1]]
+
+pt.Not_smoked <- probtrans(msf.Not_smoked, 0)[[1]]
+
+# Plot
+
+# Heart disease
+plot21 <- ggplot(NULL, aes(x = time, y = pstate2)) + 
+      geom_step(data = pt.Smoke, aes(color = 'Yes')) +
+      geom_step(data = pt.Not_smoked, aes(color = 'No')) + labs(title = 'Heart disease') + xlab('Months of follow up') + ylab('Probability') + ylim(0,0.1) +
+scale_colour_manual(name="SMQ020",
+    values=c(Yes="red", No="blue"))
+
+# Cancer
+
+plot22 <- ggplot(NULL, aes(x = time, y = pstate3)) + 
+      geom_step(data = pt.Smoke, aes(color = 'Yes')) +
+      geom_step(data = pt.Not_smoked, aes(color = 'No')) + labs(title = 'Cancer') + xlab('Months of follow up') + ylab('Probability') + ylim(0,0.1) +
+scale_colour_manual(name="SMQ020",
+    values=c(Yes="red", No="blue"))
+
+
+# Other causes
+
+plot23 <- ggplot(NULL, aes(x = time, y = pstate4)) + 
+      geom_step(data = pt.Smoke, aes(color = 'Yes')) +
+      geom_step(data = pt.Not_smoked, aes(color = 'No')) + labs(title = 'Other causes') + xlab('Months of follow up') + ylab('Probability') + ylim(0,0.1) +
+scale_colour_manual(name="SMQ020",
+    values=c(Yes="red", No="blue"))
+
+grid.arrange(plot21, plot22, plot23, nrow=1, ncol=3)
+
+
+
+### High blood pressure
+
+# Compare incidence of each outcome for those with systolic bloof pressure 110mmHh (healthy) with 150 mmHg (high), both BMI 23, male, LDL 90md/dL, aged 45, systolic blood pressure 110mmHg, with no diabetes and not smoked more than 100 cigarettes in lifetime
+Healthy <- data.frame(RIDAGEYR.1 = c(4.5,0,0), RIDAGEYR.2 = c(0,4.5,0), RIDAGEYR.3 = c(0,0,4.5), RIAGENDRFemale.1 = c(0,0,0), RIAGENDRFemale.2 = c(0,0,0), RIAGENDRFemale.3 = c(0,0,0), BMXBMI.1 = c(23, 0,0 ), BMXBMI.2 = c( 0,23,0 ), BMXBMI.3 = c( 0,0,23), LBDLDL.1 = c(9,0 ,0 ), LBDLDL.2 = c( 0,9,0 ), LBDLDL.3 = c( 0,0 ,9), DIQ010Borderline.1 = c(0 ,0 ,0 ), DIQ010Borderline.2 = c(0 ,0 ,0 ), DIQ010Borderline.3 = c(0 ,0 ,0 ), DIQ010Yes.1 =c(0 ,0 ,0 ), DIQ010Yes.2 = c(0 ,0 ,0 ), DIQ010Yes.3 = c(0 ,0 ,0 ), BPXSY1.1 = c(11,0,0), BPXSY1.2 =c(0,11,0), BPXSY1.3 = c(0,0,11), SMQ020Yes.1 = c(0,0,0), SMQ020Yes.2 = c(0,0,0), SMQ020Yes.3 = c(0,0,0), trans = c(1, 2, 3), strata = c(1, 2, 3))
+
+High <- data.frame(RIDAGEYR.1 = c(4.5,0,0), RIDAGEYR.2 = c(0,4.5,0), RIDAGEYR.3 = c(0,0,4.5), RIAGENDRFemale.1 = c(0,0,0), RIAGENDRFemale.2 = c(0,0,0), RIAGENDRFemale.3 = c(0,0,0), BMXBMI.1 = c(23, 0,0 ), BMXBMI.2 = c( 0,23,0 ), BMXBMI.3 = c( 0,0,23), LBDLDL.1 = c(9,0 ,0 ), LBDLDL.2 = c( 0,9,0 ), LBDLDL.3 = c( 0,0 ,9), DIQ010Borderline.1 = c(0 ,0 ,0 ), DIQ010Borderline.2 = c(0 ,0 ,0 ), DIQ010Borderline.3 = c(0 ,0 ,0 ), DIQ010Yes.1 =c(0 ,0 ,0 ), DIQ010Yes.2 = c(0 ,0 ,0 ), DIQ010Yes.3 = c(0 ,0 ,0 ), BPXSY1.1 = c(15,0,0), BPXSY1.2 =c(0,15,0), BPXSY1.3 = c(0,0,15), SMQ020Yes.1 = c(0,0,0), SMQ020Yes.2 = c(0,0,0), SMQ020Yes.3 = c(0,0,0), trans = c(1, 2, 3), strata = c(1, 2, 3))
+
+
+# Estimated cumulative hazards for all event times
+msf.Healthy <- msfit(c1, Healthy, trans = tmat)
+msf.High <- msfit(c1, High, trans = tmat)
+
+
+# Caluculates Cumulative Incidence
+pt.Healthy <- probtrans(msf.Healthy, 0)[[1]]
+
+pt.High <- probtrans(msf.High, 0)[[1]]
+
+# Plot
+
+# Heart disease
+plot31 <- ggplot(NULL, aes(x = time, y = pstate2)) + 
+      geom_step(data = pt.Healthy, aes(color = 'Healthy')) +
+      geom_step(data = pt.High, aes(color = 'High')) + labs(title = 'Heart disease') + xlab('Months of follow up') + ylab('Probability') + ylim(0,0.1) +
+scale_colour_manual(name="BPXSY1",
+    values=c(Healthy="red", High="blue"))
+
+# Cancer
+plot32 <- ggplot(NULL, aes(x = time, y = pstate3)) + 
+      geom_step(data = pt.Healthy, aes(color = 'Healthy')) +
+      geom_step(data = pt.High, aes(color = 'High')) + labs(title = 'Cancer') + xlab('Months of follow up') + ylab('Probability') + ylim(0,0.1) +
+scale_colour_manual(name="BPXSY1",
+    values=c(Healthy="red", High="blue"))
+
+
+
+# Other causes
+plot33 <- ggplot(NULL, aes(x = time, y = pstate4)) + 
+      geom_step(data = pt.Healthy, aes(color = 'Healthy')) +
+      geom_step(data = pt.High, aes(color = 'High')) + labs(title = 'Other causes') + xlab('Months of follow up') + ylab('Probability') + ylim(0,0.1) +
+scale_colour_manual(name="BPXSY1",
+    values=c(Healthy="red", High="blue"))
+
+grid.arrange(plot31, plot32, plot33, nrow=1, ncol=3)
+
+
+### Diabetic
+
+# Compare incidence of each outcome for those with and without diabetes, both BMI 23, male,  LDL 90md/dL, aged 45, systolic blood pressure 110mmHg, who have not smoked more than 100 cigarettes in lifetime
+Diabetic <- data.frame(RIDAGEYR.1 = c(4.8,0,0), RIDAGEYR.2 = c(0,4.8,0), RIDAGEYR.3 = c(0,0,4.8), RIAGENDRFemale.1 = c(0,0,0), RIAGENDRFemale.2 = c(0,0,0), RIAGENDRFemale.3 = c(0,0,0), BMXBMI.1 = c(28.8, 0,0 ), BMXBMI.2 = c( 0,28.8,0 ), BMXBMI.3 = c( 0,0,28.8), LBDLDL.1 = c(11.5,0 ,0 ), LBDLDL.2 = c( 0,11.5,0 ), LBDLDL.3 = c( 0,0 ,11.5), DIQ010Borderline.1 = c(0 ,0 ,0 ), DIQ010Borderline.2 = c(0 ,0 ,0 ), DIQ010Borderline.3 = c(0 ,0 ,0 ), DIQ010Yes.1 =c(1 ,0 ,0 ), DIQ010Yes.2 = c(0 ,1 ,0 ), DIQ010Yes.3 = c(0 ,0 ,1), BPXSY1.1 = c(12.4,0,0), BPXSY1.2 =c(0,12.4,0), BPXSY1.3 = c(0,0,12.4), SMQ020Yes.1 = c(0,0,0), SMQ020Yes.2 = c(0,0,0), SMQ020Yes.3 = c(0,0,0), trans = c(1, 2, 3), strata = c(1, 2, 3))
+
+Not_diabetic <- data.frame(RIDAGEYR.1 = c(4.8,0,0), RIDAGEYR.2 = c(0,4.8,0), RIDAGEYR.3 = c(0,0,4.8), RIAGENDRFemale.1 = c(0,0,0), RIAGENDRFemale.2 = c(0,0,0), RIAGENDRFemale.3 = c(0,0,0), BMXBMI.1 = c(28.8, 0,0 ), BMXBMI.2 = c( 0,28.8,0 ), BMXBMI.3 = c( 0,0,28.8), LBDLDL.1 = c(11.5,0 ,0 ), LBDLDL.2 = c( 0,11.5,0 ), LBDLDL.3 = c( 0,0 ,11.5), DIQ010Borderline.1 = c(0 ,0 ,0 ), DIQ010Borderline.2 = c(0 ,0 ,0 ), DIQ010Borderline.3 = c(0 ,0 ,0 ), DIQ010Yes.1 =c(0 ,0 ,0 ), DIQ010Yes.2 = c(0 ,0 ,0 ), DIQ010Yes.3 = c(0 ,0 ,0 ), BPXSY1.1 = c(12.4,0,0), BPXSY1.2 =c(0,12.4,0), BPXSY1.3 = c(0,0,12.4), SMQ020Yes.1 = c(0,0,0), SMQ020Yes.2 = c(0,0,0), SMQ020Yes.3 = c(0,0,0), trans = c(1, 2, 3), strata = c(1, 2, 3))
+
+
+# Estimated cumulative hazards for all event times
+msf.diabetic <- msfit(c1, Diabetic, trans = tmat)
+msf.not_diabetic <- msfit(c1, Not_diabetic, trans = tmat)
+
+
+# Caluculates Cumulative Incidence
+pt.diabetic <- probtrans(msf.diabetic, 0)[[1]]
+
+pt.not_diabetic <- probtrans(msf.not_diabetic, 0)[[1]]
+
+# Plot
+
+# Heart disease
+plot41 <- ggplot(NULL, aes(x = time, y = pstate2)) + 
+      geom_step(data = pt.diabetic, aes(color = 'Yes')) +
+      geom_step(data = pt.not_diabetic, aes(color = 'No')) + labs(title = 'Heart disease') + xlab('Months of follow up') + ylab('Probability') + ylim(0,0.1) +
+scale_colour_manual(name="DIQ010",
+    values=c(Yes="red", No="blue"))
+
+# Cancer
+plot42<- ggplot(NULL, aes(x = time, y = pstate3)) + 
+      geom_step(data = pt.diabetic, aes(color = 'Yes')) +
+      geom_step(data = pt.not_diabetic, aes(color = 'No')) + labs(title = 'Cancer') + xlab('Months of follow up') + ylab('Probability') + ylim(0,0.1) +
+scale_colour_manual(name="DIQ010",
+    values=c(Yes="red", No="blue"))
+
+plot43<- ggplot(NULL, aes(x = time, y = pstate4)) + 
+      geom_step(data = pt.diabetic, aes(color = 'Yes')) +
+      geom_step(data = pt.not_diabetic, aes(color = 'No')) + labs(title = 'Other causes') + xlab('Months of follow up') + ylab('Probability') + ylim(0,0.1) +
+scale_colour_manual(name="DIQ010",
+    values=c(Yes="red", No="blue"))
+
+grid.arrange(plot41, plot42, plot43, nrow=1, ncol=3)
+
+
+
+### Age
+
+# Compare incidence of each outcome for a 20 and 70 year old, both BMI 23, male, LDL 90md/dL, systolic blood pressure 110mmHg, with no diabetes and not smoked more than 100 cigarettes in lifetime
+Young <- data.frame(RIDAGEYR.1 = c(2,0,0), RIDAGEYR.2 = c(0,2,0), RIDAGEYR.3 = c(0,0,2), RIAGENDRFemale.1 = c(0,0,0), RIAGENDRFemale.2 = c(0,0,0), RIAGENDRFemale.3 = c(0,0,0), BMXBMI.1 = c(23, 0,0 ), BMXBMI.2 = c( 0,23,0 ), BMXBMI.3 = c( 0,0,23), LBDLDL.1 = c(9,0 ,0 ), LBDLDL.2 = c( 0,9,0 ), LBDLDL.3 = c( 0,0 ,9), DIQ010Borderline.1 = c(0 ,0 ,0 ), DIQ010Borderline.2 = c(0 ,0 ,0 ), DIQ010Borderline.3 = c(0 ,0 ,0 ), DIQ010Yes.1 =c(0 ,0 ,0 ), DIQ010Yes.2 = c(0 ,0 ,0 ), DIQ010Yes.3 = c(0 ,0 ,0 ), BPXSY1.1 = c(11,0,0), BPXSY1.2 =c(0,11,0), BPXSY1.3 = c(0,0,11), SMQ020Yes.1 = c(0,0,0), SMQ020Yes.2 = c(0,0,0), SMQ020Yes.3 = c(0,0,0), trans = c(1, 2, 3), strata = c(1, 2, 3))
+
+Old <-  data.frame(RIDAGEYR.1 = c(7,0,0), RIDAGEYR.2 = c(0,7,0), RIDAGEYR.3 = c(0,0,7), RIAGENDRFemale.1 = c(0,0,0), RIAGENDRFemale.2 = c(0,0,0), RIAGENDRFemale.3 = c(0,0,0), BMXBMI.1 = c(23, 0,0 ), BMXBMI.2 = c( 0,23,0 ), BMXBMI.3 = c( 0,0,23), LBDLDL.1 = c(9,0 ,0 ), LBDLDL.2 = c( 0,9,0 ), LBDLDL.3 = c( 0,0 ,9), DIQ010Borderline.1 = c(0 ,0 ,0 ), DIQ010Borderline.2 = c(0 ,0 ,0 ), DIQ010Borderline.3 = c(0 ,0 ,0 ), DIQ010Yes.1 =c(0 ,0 ,0 ), DIQ010Yes.2 = c(0 ,0 ,0 ), DIQ010Yes.3 = c(0 ,0 ,0 ), BPXSY1.1 = c(11,0,0), BPXSY1.2 =c(0,11,0), BPXSY1.3 = c(0,0,11), SMQ020Yes.1 = c(0,0,0), SMQ020Yes.2 = c(0,0,0), SMQ020Yes.3 = c(0,0,0), trans = c(1, 2, 3), strata = c(1, 2, 3))
+
+
+# Estimated cumulative hazards for all event times
+msf.young <- msfit(c1, Young, trans = tmat)
+msf.old <- msfit(c1, Old, trans = tmat)
+
+
+# Caluculates Cumulative Incidence
+pt.young <- probtrans(msf.young, 0)[[1]]
+
+pt.old <- probtrans(msf.old, 0)[[1]]
+
+# Plot
+
+# Heart disease
+plot51 <- ggplot(NULL, aes(x = time, y = pstate2)) + 
+      geom_step(data = pt.young, aes(color = 'Twenty')) +
+      geom_step(data = pt.old, aes(color = 'Seventy')) + labs(title = 'Heart disease') + xlab('Months of follow up') + ylab('Probability') + ylim(0,0.15) +
+scale_colour_manual(name="Age",
+    values=c(Twenty="red", Seventy="blue"))
+
+# Cancer
+plot52 <- ggplot(NULL, aes(x = time, y = pstate3)) + 
+      geom_step(data = pt.young, aes(color = 'Twenty')) +
+      geom_step(data = pt.old, aes(color = 'Seventy')) + labs(title = 'Cancer') + xlab('Months of follow up') + ylab('Probability') + ylim(0,0.15) +
+scale_colour_manual(name="Age",
+    values=c(Twenty="red", Seventy="blue"))
+
+
+# Other causes
+plot53 <- ggplot(NULL, aes(x = time, y = pstate4)) + 
+      geom_step(data = pt.young, aes(color = 'Twenty')) +
+      geom_step(data = pt.old, aes(color = 'Seventy')) + labs(title = 'Other causes') + xlab('Months of follow up') + ylab('Probability') + ylim(0,0.15) +
+scale_colour_manual(name="Age",
+    values=c(Twenty="red", Seventy="blue"))
+
+grid.arrange(plot51, plot52, plot53, nrow=1, ncol=3)
+
+
+
+
+
+
+### BMI
+
+# Compare incidence of each outcome for BMI 23 (healthy) vs BMI 35 (obese), both male, LDL 90md/dL, aged 45, systolic blood pressure 110mmHg, with no diabetes and not smoked more than 100 cigarettes in lifetime
+Healthy <- data.frame(RIDAGEYR.1 = c(4.5,0,0), RIDAGEYR.2 = c(0,4.5,0), RIDAGEYR.3 = c(0,0,4.5), RIAGENDRFemale.1 = c(0,0,0), RIAGENDRFemale.2 = c(0,0,0), RIAGENDRFemale.3 = c(0,0,0), BMXBMI.1 = c(23, 0,0 ), BMXBMI.2 = c( 0,23,0 ), BMXBMI.3 = c( 0,0, 23), LBDLDL.1 = c(9,0 ,0 ), LBDLDL.2 = c( 0,9,0 ), LBDLDL.3 = c( 0,0 ,9), DIQ010Borderline.1 = c(0 ,0 ,0 ), DIQ010Borderline.2 = c(0 ,0 ,0 ), DIQ010Borderline.3 = c(0 ,0 ,0 ), DIQ010Yes.1 =c(0 ,0 ,0 ), DIQ010Yes.2 = c(0 ,0 ,0 ), DIQ010Yes.3 = c(0 ,0 ,0 ), BPXSY1.1 = c(11,0,0), BPXSY1.2 =c(0,11,0), BPXSY1.3 = c(0,0,11), SMQ020Yes.1 = c(0,0,0), SMQ020Yes.2 = c(0,0,0), SMQ020Yes.3 = c(0,0,0), trans = c(1, 2, 3), strata = c(1, 2, 3))
+
+Obese <- data.frame(RIDAGEYR.1 = c(4.5,0,0), RIDAGEYR.2 = c(0,4.5,0), RIDAGEYR.3 = c(0,0,4.5), RIAGENDRFemale.1 = c(0,0,0), RIAGENDRFemale.2 = c(0,0,0), RIAGENDRFemale.3 = c(0,0,0), BMXBMI.1 = c(35, 0,0 ), BMXBMI.2 = c( 0,35,0 ), BMXBMI.3 = c( 0,0,35), LBDLDL.1 = c(9,0 ,0 ), LBDLDL.2 = c( 0,9,0 ), LBDLDL.3 = c( 0,0 ,9), DIQ010Borderline.1 = c(0 ,0 ,0 ), DIQ010Borderline.2 = c(0 ,0 ,0 ), DIQ010Borderline.3 = c(0 ,0 ,0 ), DIQ010Yes.1 =c(0 ,0 ,0 ), DIQ010Yes.2 = c(0 ,0 ,0 ), DIQ010Yes.3 = c(0 ,0 ,0 ), BPXSY1.1 = c(11,0,0), BPXSY1.2 =c(0,11,0), BPXSY1.3 = c(0,0,11), SMQ020Yes.1 = c(0,0,0), SMQ020Yes.2 = c(0,0,0), SMQ020Yes.3 = c(0,0,0), trans = c(1, 2, 3), strata = c(1, 2, 3))
+
+
+# Estimated cumulative hazards for all event times
+msf.healthy <- msfit(c1, Healthy, trans = tmat)
+msf.obese<- msfit(c1, Obese, trans = tmat)
+
+
+# Caluculates Cumulative Incidence
+pt.healthy <- probtrans(msf.healthy, 0)[[1]]
+
+pt.obese <- probtrans(msf.obese, 0)[[1]]
+
+# Plot
+
+# Heart disease
+plot61 <- ggplot(NULL, aes(x = time, y = pstate2)) + 
+      geom_step(data = pt.healthy, aes(color = 'Healthy')) +
+      geom_step(data = pt.obese, aes(color = 'Obese')) + labs(title = 'Heart disease') + xlab('Months of follow up') + ylab('Probability') + ylim(0,0.1) +
+scale_colour_manual(name="BMI",
+    values=c(Healthy="red", Obese="blue"))
+
+plot62 <- ggplot(NULL, aes(x = time, y = pstate3)) + 
+      geom_step(data = pt.healthy, aes(color = 'Healthy')) +
+      geom_step(data = pt.obese, aes(color = 'Obese')) + labs(title = 'Cancer') + xlab('Months of follow up') + ylab('Probability') + ylim(0,0.1) +
+scale_colour_manual(name="BMI",
+    values=c(Healthy="red", Obese="blue"))
+
+plot63 <- ggplot(NULL, aes(x = time, y = pstate4)) + 
+      geom_step(data = pt.healthy, aes(color = 'Healthy')) +
+      geom_step(data = pt.obese, aes(color = 'Obese')) + labs(title = 'Other causes') + xlab('Months of follow up') + ylab('Probability') + ylim(0,0.1) +
+scale_colour_manual(name="BMI",
+    values=c(Healthy="red", Obese="blue"))
+
+grid.arrange(plot61, plot62, plot63, nrow=1, ncol=3)
+
+
+
+
+
+
+
+### LDL
+
+# Compare incidence of each outcome for individial with LDL 90mg/dL vs. 200mg/dL, both BMI 23, male, aged 45, systolic blood pressure 110mmHg, with no diabetes and not smoked more than 100 cigarettes in lifetime
+Ideal <- data.frame(RIDAGEYR.1 = c(4.5,0,0), RIDAGEYR.2 = c(0,4.5,0), RIDAGEYR.3 = c(0,0,4.5), RIAGENDRFemale.1 = c(0,0,0), RIAGENDRFemale.2 = c(0,0,0), RIAGENDRFemale.3 = c(0,0,0), BMXBMI.1 = c(23, 0,0 ), BMXBMI.2 = c( 0,23,0 ), BMXBMI.3 = c( 0,0,23), LBDLDL.1 = c(9,0 ,0 ), LBDLDL.2 = c( 0,9,0 ), LBDLDL.3 = c( 0,0 ,9), DIQ010Borderline.1 = c(0 ,0 ,0 ), DIQ010Borderline.2 = c(0 ,0 ,0 ), DIQ010Borderline.3 = c(0 ,0 ,0 ), DIQ010Yes.1 =c(0 ,0 ,0 ), DIQ010Yes.2 = c(0 ,0 ,0 ), DIQ010Yes.3 = c(0 ,0 ,0 ), BPXSY1.1 = c(11,0,0), BPXSY1.2 =c(0,11,0), BPXSY1.3 = c(0,0,11), SMQ020Yes.1 = c(0,0,0), SMQ020Yes.2 = c(0,0,0), SMQ020Yes.3 = c(0,0,0), trans = c(1, 2, 3), strata = c(1, 2, 3))
+
+
+High <- data.frame(RIDAGEYR.1 = c(4.5,0,0), RIDAGEYR.2 = c(0,4.5,0), RIDAGEYR.3 = c(0,0,4.5), RIAGENDRFemale.1 = c(0,0,0), RIAGENDRFemale.2 = c(0,0,0), RIAGENDRFemale.3 = c(0,0,0), BMXBMI.1 = c(23, 0,0 ), BMXBMI.2 = c( 0,23,0 ), BMXBMI.3 = c( 0,0,23), LBDLDL.1 = c(20,0 ,0 ), LBDLDL.2 = c( 0,20,0 ), LBDLDL.3 = c( 0,0 ,20), DIQ010Borderline.1 = c(0 ,0 ,0 ), DIQ010Borderline.2 = c(0 ,0 ,0 ), DIQ010Borderline.3 = c(0 ,0 ,0 ), DIQ010Yes.1 =c(0 ,0 ,0 ), DIQ010Yes.2 = c(0 ,0 ,0 ), DIQ010Yes.3 = c(0 ,0 ,0 ), BPXSY1.1 = c(11,0,0), BPXSY1.2 =c(0,11,0), BPXSY1.3 = c(0,0,11), SMQ020Yes.1 = c(0,0,0), SMQ020Yes.2 = c(0,0,0), SMQ020Yes.3 = c(0,0,0), trans = c(1, 2, 3), strata = c(1, 2, 3))
+
+
+# Estimated cumulative hazards for all event times
+msf.ideal <- msfit(c1, Ideal, trans = tmat)
+msf.vhigh <- msfit(c1, High, trans = tmat)
+
+
+# Caluculates Cumulative Incidence
+pt.ideal <- probtrans(msf.ideal, 0)[[1]]
+
+pt.vhigh <- probtrans(msf.vhigh, 0)[[1]]
+
+# Plot
+
+# Heart disease
+plot71 <- ggplot(NULL, aes(x = time, y = pstate2)) + 
+      geom_step(data = pt.ideal, aes(color = 'Ideal')) +
+      geom_step(data = pt.vhigh, aes(color = 'High')) + labs(title = 'Heart disease') + xlab('Months of follow up') + ylab('Probability') + ylim(0,0.1) +
+scale_colour_manual(name="LDL",
+    values=c(Ideal="red", High="blue"))
+
+plot72<- ggplot(NULL, aes(x = time, y = pstate3)) + 
+      geom_step(data = pt.ideal, aes(color = 'Ideal')) +
+      geom_step(data = pt.vhigh, aes(color = 'High')) + labs(title = 'Cancer') + xlab('Months of follow up') + ylab('Probability') + ylim(0,0.1) +
+scale_colour_manual(name="LDL",
+    values=c(Ideal="red", High="blue"))
+
+plot73 <- ggplot(NULL, aes(x = time, y = pstate4)) + 
+      geom_step(data = pt.ideal, aes(color = 'Ideal')) +
+      geom_step(data = pt.vhigh, aes(color = 'High')) + labs(title = 'Other causes') + xlab('Months of follow up') + ylab('Probability') + ylim(0,0.1) +
+scale_colour_manual(name="LDL",
+    values=c(Ideal="red", High="blue"))
+
+grid.arrange(plot71, plot72, plot73, nrow=1, ncol=3)
+
+
+```
+
+
+# 2: Fine and Gray Model
+
+The code below implementing the Fine-Gray model on the NHANES mortality linked dataset was adapted from a tutorial by L.Scrucca et al. on finding estimates using the `crr()` function in R [5].
+
+
+```{r}
+# Remove individuals with missing covariate data:
+data_complete <- na.omit(data_short) %>% select(-c(stat1, stat2, stat3))
+summary(data_complete)
+
+
+ftime <- data_complete$time 
+fstatus <- data_complete$status 
+
+
+# Convert covariate to 0/1 numerical variable:
+Gender <- as.numeric(data_complete$RIAGENDR)-1
+
+
+# Diabetes indicator variables
+DIQ010.Yes <- ifelse(data_complete$DIQ010 == 'Yes', 1, 0)
+DIQ010.Borderline <- ifelse(data_complete$DIQ010 == 'Borderline', 1, 0)
+
+
+# Check
+sum(DIQ010.Yes)
+sum(DIQ010.Borderline)
+
+# Smoking indicator variables
+SMQ020.Yes <- ifelse(data_complete$SMQ020 == 'Yes', 1, 0)
+
+sum(SMQ020.Yes )
+
+
+# Create matrix of covariates - row per individual:
+x = data.frame(RIDAGEYR = data_complete$RIDAGEYR, RIAGENDR.Female = Gender, BMXBMI = data_complete$BMXBMI, LBDLDL = data_complete$LBDLDL, DIQ010.Borderline, DIQ010.Yes, BPXSY1 = data_complete$BPXSY1, SMQ020.Yes)
+
+head(data_complete)
+head(x)
+
+
+
+
+
+### Heart disease deaths
+mod1 <- crr(ftime, fstatus, x)
+summary(mod1)
+
+
+## Obtain overall p-value for factors with more than 2 levels
+library(aod)
+wald.test(mod1$var, mod1$coef, Terms = 5:6)
+# Indicates diabetes factor is not statistically significant
+
+
+
+
+
+
+
+
+### Cancer deaths
+mod2 <- crr(ftime, fstatus, x, failcode = 2)
+summary(mod2)
+
+
+## Obtain overall p-value for factors with more than 2 levels
+
+wald.test(mod2$var, mod1$coef, Terms = 5:6)
+# Indicates diabetes factor is not statistically significant
+
+
+
+
+
+
+
+
+
+
+### Other deaths
+mod3 <- crr(ftime, fstatus, x, failcode = 3)
+summary(mod3)
+
+
+## Obtain overall p-value for factors with more than 2 levels
+
+wald.test(mod3$var, mod1$coef, Terms = 5:6)
+# Indicates diabetes factor is not statistically significant
+
+
+
+
+crr(ftime, fstatus, DIQ010.Yes)
+```
+
+### Cumulative incidence function prediction
+
+```{r}
+
+# Create matrix to estimate at:
+x_ = data.frame(Gender, data_complete$RIDAGEYR, data_complete$BMXBMI, data_complete$LBDLDL, DIQ010.Borderline, DIQ010.Yes, data_complete$BPXSY1, SMQ020.Yes)
+
+
+
+#### GENDER
+# Set of covariates to predict for:
+# Heart
+pred_genderH <- predict(mod1,rbind(c(4.8,0,28.8,11.5,0,0,12.4,0),
+                                   c(4.8,1,28.8,11.5,0,0,12.4,0)))
+                        
+#pred_genderH
+
+gender_heart <- data.frame(time = pred_genderH[,1], m = pred_genderH[,2], f = pred_genderH[,3])
+
+
+# Cancer
+pred_genderC <- predict(mod2,rbind(c(4.8,0,28.8,11.5,0,0,12.4,0),
+                                   c(4.8,1,28.8,11.5,0,0,12.4,0)))
+
+gender_cancer <- data.frame(time = pred_genderC[,1], m = pred_genderC[,2], f = pred_genderC[,3])
+
+
+# Other causes
+pred_genderO <- predict(mod3,rbind(c(4.8,0,28.8,11.5,0,0,12.4,0),
+                                   c(4.8,1,28.8,11.5,0,0,12.4,0))) 
+
+gender_other <- data.frame(time = pred_genderO[,1], m = pred_genderO[,2], f = pred_genderO[,3])
+
+
+
+x <- ggplot(gender_heart) + 
+      geom_step( aes(x = time, y = m, color = 'Male')) +
+      geom_step(aes(x = time, y = f, color = 'Female')) +
+  labs(title = 'Heart disease') + xlab('Months of follow up')+ ylab('Probability') + ylim(0, 0.1) +
+scale_colour_manual(name="Gender",
+    values=c(Male="red", Female="blue"))
+
+y <- ggplot(gender_cancer) + 
+      geom_step( aes(x = time, y = m, color = 'Male')) +
+      geom_step(aes(x = time, y = f, color = 'Female')) +
+  labs(title = 'Cancer') + xlab('Months of follow up') + ylab('Probability') + ylim(0, 0.1) +
+scale_colour_manual(name="Gender",
+    values=c(Male="red", Female="blue"))
+
+z <- ggplot(gender_other) + 
+      geom_step( aes(x = time, y = m, color = 'Male')) +
+      geom_step(aes(x = time, y = f, color = 'Female')) +
+  labs(title = 'Other causes') + xlab('Months of follow up') + ylab('Probability') + ylim(0, 0.1) +
+scale_colour_manual(name="Gender",
+    values=c(Male="red", Female="blue"))
+
+
+grid.arrange(x, y, z, nrow=1, ncol=3)
+
+
+
+
+
+
+#### DIABETES
+# Set of covariates to predict for:
+# Heart
+pred_dbH <- predict(mod1,rbind(c(4.8,0,28.8,11.5,0,0,12.4,0),
+                               c(4.8,0,28.8,11.5,0,1,12.4,0)))
+
+
+db_heart <- data.frame(time = pred_dbH[,1], m = pred_dbH[,2], f = pred_dbH[,3])
+
+
+# Cancer
+pred_dbC <- predict(mod2,rbind(c(4.8,0,28.8,11.5,0,0,12.4,0),
+                               c(4.8,0,28.8,11.5,0,1,12.4,0)))
+
+db_cancer <- data.frame(time = pred_dbC[,1], m = pred_dbC[,2], f = pred_dbC[,3])
+
+
+# Other causes
+pred_dbO <- predict(mod3,rbind(c(4.8,0,28.8,11.5,0,0,12.4,0),
+                               c(4.8,0,28.8,11.5,0,1,12.4,0)))
+
+db_other <- data.frame(time = pred_dbO[,1], m = pred_dbO[,2], f = pred_dbO[,3])
+
+# PLot
+x <- ggplot(db_heart) + 
+      geom_step( aes(x = time, y = m, color = 'No')) +
+      geom_step(aes(x = time, y = f, color = 'Yes')) +
+  labs(title = 'Heart disease') + xlab('Months of follow up') + ylab('Probability') + ylim(0, 0.1) +
+scale_colour_manual(name="DIQ010",
+    values=c(No="red", Yes="blue"))
+
+y <- ggplot(db_cancer) + 
+      geom_step( aes(x = time, y = m, color = 'No')) +
+      geom_step(aes(x = time, y = f, color = 'Yes')) +
+  labs(title = 'Cancer') + xlab('Months of follow up') + ylab('Probability') + ylim(0, 0.1) +
+scale_colour_manual(name="DIQ010",
+    values=c(No="red", Yes="blue"))
+
+z <- ggplot(db_other) + 
+      geom_step( aes(x = time, y = m, color = 'No')) +
+      geom_step(aes(x = time, y = f, color = 'Yes')) +
+  labs(title = 'Other causes') + xlab('Months of follow up') + ylab('Probability') + ylim(0, 0.1) +
+scale_colour_manual(name="DIQ010",
+    values=c(No="red", Yes="blue"))
+
+
+grid.arrange(x, y, z, nrow=1, ncol=3)
+
+
+
+
+
+
+#### HIGH BLOOD PRESSURE
+# Set of covariates to predict for:
+# Heart
+pred_highbpH <- predict(mod1,rbind(c(4.5,0,23,9,0,0,11,0),
+                                   c(4.5,0,23,9,0,0,15,0)))
+
+
+highbp_heart <- data.frame(time = pred_highbpH[,1], 
+                           m = pred_highbpH[,2], f = pred_highbpH[,3])
+
+
+# Cancer
+pred_highbpC <- predict(mod2,rbind(c(4.5,0,23,9,0,0,11,0),
+                                   c(4.5,0,23,9,0,0,15,0)))
+
+highbp_cancer <- data.frame(time = pred_highbpC[,1], m = pred_highbpC[,2], f = pred_highbpC[,3])
+
+
+# Other causes
+pred_highbpO <- predict(mod3,rbind(c(4.5,0,23,9,0,0,11,0),
+                                   c(4.5,0,23,9,0,0,15,0))) 
+
+highbp_other <- data.frame(time = pred_highbpO[,1], m = pred_highbpO[,2], f = pred_highbpO[,3])
+
+# PLot
+x <- ggplot(highbp_heart) + 
+      geom_step( aes(x = time, y = m, color = 'Normal')) +
+      geom_step(aes(x = time, y = f, color = 'High')) +
+  labs(title = 'Heart disease') + xlab('Months of follow up') + ylab('Probability') + ylim(0, 0.1) +
+scale_colour_manual(name="BPXSY1",
+    values=c(Normal="red", High="blue"))
+
+y <- ggplot(highbp_cancer) + 
+      geom_step( aes(x = time, y = m, color = 'Normal')) +
+      geom_step(aes(x = time, y = f, color = 'High')) +
+  labs(title = 'Cancer') + xlab('Months of follow up') + ylab('Probability') + ylim(0, 0.1) +
+scale_colour_manual(name="BPXSY1",
+    values=c(Normal="red", High="blue"))
+
+z <- ggplot(highbp_other) + 
+      geom_step( aes(x = time, y = m, color = 'Normal')) +
+      geom_step(aes(x = time, y = f, color = 'High')) +
+  labs(title = 'Other causes') + xlab('Months of follow up') + ylab('Probability') + ylim(0, 0.1) +
+scale_colour_manual(name="BPXSY1",
+    values=c(Normal="red", High="blue"))
+
+
+grid.arrange(x, y, z, nrow=1, ncol=3)
+
+
+
+
+
+
+#### SMOKING
+# Set of covariates to predict for:
+# Heart
+pred_smokeH <- predict(mod1,rbind(c(4.5,0,23,9,0,0,11,0),
+                                   c(4.5,0,23,9,0,0,11,1)))
+
+
+smoke_heart <- data.frame(time = pred_smokeH[,1], 
+                           m = pred_smokeH[,2], f = pred_smokeH[,3])
+
+
+# Cancer
+pred_smokeC <- predict(mod2,rbind(c(4.5,0,23,9,0,0,11,0),
+                                   c(4.5,0,23,9,0,0,11,1)))
+
+smoke_cancer <- data.frame(time = pred_smokeC[,1], m = pred_smokeC[,2], f = pred_smokeC[,3])
+
+
+# Other causes
+pred_smokeO <- predict(mod3,rbind(c(4.5,0,23,9,0,0,11,0),
+                                   c(4.5,0,23,9,0,0,11,1))) 
+
+smoke_other <- data.frame(time = pred_smokeO[,1], m = pred_smokeO[,2], f = pred_smokeO[,3])
+
+# PLot
+x <- ggplot(smoke_heart) + 
+      geom_step( aes(x = time, y = m, color = 'No')) +
+      geom_step(aes(x = time, y = f, color = 'Yes')) +
+  labs(title = 'Heart disease') + xlab('Months of follow up') + ylab('Probability') + ylim(0, 0.1) +
+scale_colour_manual(name="SMQ020",
+    values=c(No="red", Yes="blue"))
+
+y <- ggplot(smoke_cancer) + 
+      geom_step( aes(x = time, y = m, color = 'No')) +
+      geom_step(aes(x = time, y = f, color = 'Yes')) +
+  labs(title = 'Cancer') + xlab('Months of follow up') + ylab('Probability') + ylim(0, 0.1) +
+scale_colour_manual(name="SMQ020",
+    values=c(No="red", Yes="blue"))
+
+z <- ggplot(smoke_other) + 
+      geom_step( aes(x = time, y = m, color = 'No')) +
+      geom_step(aes(x = time, y = f, color = 'Yes')) +
+  labs(title = 'Other causes') + xlab('Months of follow up') + ylab('Probability') + ylim(0, 0.1) +
+scale_colour_manual(name="SMQ020",
+    values=c(No="red", Yes="blue"))
+
+
+
+grid.arrange(x, y, z, nrow=1, ncol=3)
+
+
+
+
+
+
+
+
+#### AGE
+# Set of covariates to predict for (comparing 20 and 70 year olds with sam BMI, LDL, who don't smoke, have diabetes or high blood pressure:
+# Heart
+pred_ageH <- predict(mod1,rbind(c(2,0,23,9,0,0,11,0),
+                                   c(7,0,23,9,0,0,11,0)))
+
+
+age_heart <- data.frame(time = pred_ageH[,1], 
+                           m = pred_ageH[,2], f = pred_ageH[,3])
+
+
+# Cancer
+pred_ageC <- predict(mod2,rbind(c(2,0,23,9,0,0,11,0),
+                                   c(7,0,23,9,0,0,11,0)))
+
+age_cancer <- data.frame(time = pred_ageC[,1], m = pred_ageC[,2], f = pred_ageC[,3])
+
+
+# Other causes
+pred_ageO <- predict(mod3,rbind(c(2,0,23,9,0,0,11,0),
+                                   c(7,0,23,9,0,0,11,0)))
+
+age_other <- data.frame(time = pred_ageO[,1], m = pred_ageO[,2], f = pred_ageO[,3])
+
+# PLot
+x <- ggplot(age_heart) + 
+      geom_step( aes(x = time, y = m, color = 'Twenty')) +
+      geom_step(aes(x = time, y = f, color = 'Seventy')) +
+  labs(title = 'Heart disease') + xlab('Months of follow up') + ylab('Probability') + ylim(0, 0.15) +
+scale_colour_manual(name="Age",
+    values=c(Twenty="red", Seventy="blue"))
+
+y <- ggplot(age_cancer) + 
+      geom_step( aes(x = time, y = m, color = 'Twenty')) +
+      geom_step(aes(x = time, y = f, color = 'Seventy')) +
+  labs(title = 'Cancer') + xlab('Months of follow up') + ylab('Probability') + ylim(0, 0.15) +
+scale_colour_manual(name="Age",
+    values=c(Twenty="red", Seventy="blue"))
+
+z <- ggplot(age_other) + 
+      geom_step( aes(x = time, y = m, color = 'Twenty')) +
+      geom_step(aes(x = time, y = f, color = 'Seventy')) +
+  labs(title = 'Other causes') + xlab('Months of follow up') + ylab('Probability') + ylim(0, 0.15) +
+scale_colour_manual(name="Age",
+    values=c(Twenty="red", Seventy="blue"))
+
+grid.arrange(x, y, z, nrow=1, ncol=3)
+
+
+
+
+
+
+
+
+
+#### BMI
+# Set of covariates to predict for (comparing people with BMI 23 and BMI 35 with same age, LDL, who don't smoke, have diabetes or high blood pressure:
+# Heart
+pred_bmiH <- predict(mod1,rbind(c(4.5,0,23,9,0,0,11,0),
+                                   c(4.5,0,35,9,0,0,11,0)))
+
+
+bmi_heart <- data.frame(time = pred_bmiH[,1], 
+                           m = pred_bmiH[,2], f = pred_bmiH[,3])
+
+
+# Cancer
+pred_bmiC <- predict(mod2,rbind(c(4.5,0,23,9,0,0,11,0),
+                                   c(4.5,0,35,9,0,0,11,0)))
+
+bmi_cancer <- data.frame(time = pred_bmiC[,1], m = pred_bmiC[,2], f = pred_bmiC[,3])
+
+
+# Other causes
+pred_bmiO <- predict(mod3,rbind(c(4.5,0,23,9,0,0,11,0),
+                                   c(4.5,0,35,9,0,0,11,0)))
+
+bmi_other <- data.frame(time = pred_bmiO[,1], m = pred_bmiO[,2], f = pred_bmiO[,3])
+
+# PLot
+x <- ggplot(bmi_heart) + 
+      geom_step( aes(x = time, y = m, color = 'Twenty-Three')) +
+      geom_step(aes(x = time, y = f, color = 'Thirty-Five')) +
+  labs(title = 'Heart disease') + xlab('Months of follow up') + ylab('Probability') + ylim(0, 0.1) +
+scale_colour_manual(name="BMI",
+    values=c('Twenty-Three'="red", 'Thirty-Five'="blue"))
+
+y <- ggplot(bmi_cancer) + 
+      geom_step( aes(x = time, y = m, color = 'Twenty-Three')) +
+      geom_step(aes(x = time, y = f, color = 'Thirty-Five')) +
+  labs(title = 'Cancer') + xlab('Months of follow up') + ylab('Probability') + ylim(0, 0.1) +
+scale_colour_manual(name="BMI",
+    values=c('Twenty-Three'="red", 'Thirty-Five'="blue"))
+
+z <- ggplot(bmi_other) + 
+      geom_step( aes(x = time, y = m, color = 'Twenty-Three')) +
+      geom_step(aes(x = time, y = f, color = 'Thirty-Five')) +
+  labs(title = 'Other causes') + xlab('Months of follow up') + ylab('Probability') + ylim(0, 0.1) +
+scale_colour_manual(name="BMI",
+    values=c('Twenty-Three'="red", 'Thirty-Five'="blue"))
+
+grid.arrange(x, y, z, nrow=1, ncol=3)
+
+
+
+
+
+
+
+
+
+
+#### LDL
+# Set of covariates to predict for (comparing people with BMI 23 and BMI 35 with same age, BMI, who don't smoke, have diabetes or high blood pressure:
+# Heart
+pred_ldlH <- predict(mod1,rbind(c(4.5,0,23,9,0,0,11,0),
+                                   c(4.5,0,23,20,0,0,11,0)))
+
+
+ldl_heart <- data.frame(time = pred_ldlH[,1], 
+                           m = pred_ldlH[,2], f = pred_ldlH[,3])
+
+
+# Cancer
+pred_ldlC <- predict(mod2,rbind(c(4.5,0,23,9,0,0,11,0),
+                                   c(4.5,0,23,20,0,0,11,0)))
+
+ldl_cancer <- data.frame(time = pred_ldlC[,1], m = pred_ldlC[,2], f = pred_ldlC[,3])
+
+
+# Other causes
+pred_ldlO <- predict(mod3,rbind(c(4.5,0,23,9,0,0,11,0),
+                                   c(4.5,0,23,20,0,0,11,0)))
+
+ldl_other <- data.frame(time = pred_ldlO[,1], m = pred_ldlO[,2], f = pred_ldlO[,3])
+
+# PLot
+x <- ggplot(ldl_heart) + 
+      geom_step( aes(x = time, y = m, color = 'Ideal')) +
+      geom_step(aes(x = time, y = f, color = 'High')) +
+  labs(title = 'Heart disease') + xlab('Months of follow up') + ylab('Probability') + ylim(0, 0.1) +
+scale_colour_manual(name="LDL",
+    values=c('Ideal'="red", 'High'="blue"))
+
+y <- ggplot(ldl_cancer) + 
+      geom_step( aes(x = time, y = m, color = 'Ideal')) +
+      geom_step(aes(x = time, y = f, color = 'High')) +
+  labs(title = 'Cancer') + xlab('Months of follow up') + ylab('Probability') + ylim(0, 0.1) +
+scale_colour_manual(name="LDL",
+    values=c('Ideal'="red", 'High'="blue"))
+
+
+z <- ggplot(ldl_other) + 
+      geom_step( aes(x = time, y = m, color = 'Ideal')) +
+      geom_step(aes(x = time, y = f, color = 'High')) +
+  labs(title = 'Other causes') + xlab('Months of follow up') + ylab('Probability') + ylim(0, 0.1) +
+scale_colour_manual(name="LDL",
+    values=c('Ideal'="red", 'High'="blue"))
+
+grid.arrange(x, y, z, nrow=1, ncol=3)
+```
+
+#### We can compare the Fine-Gray cumulative hazard estimates to the non-parametric cumulative hazard estimates to assess fit
+
+```{r}
+
+## GENDER
+ci <- Cuminc(data_complete$time, as.numeric(data_complete$status),
+             group = data_complete$RIAGENDR)
+
+ci.m <- ci[ci$group == "Male", ] 
+ci.f <- ci[ci$group == "Female", ]
+
+#Plot
+
+x <- ggplot(data = NULL, aes(x= time, y = CI.2)) + 
+      geom_step(data = ci.m, aes(color = 'Male')) +
+      geom_step(data = ci.f, aes(color = 'Female')) +
+  labs(title = 'Heart disease') + xlab('Months of follow up') + ylab('Probability') + ylim(0, 0.1) +
+scale_colour_manual(name="Gender",
+    values=c(Male="red", Female="blue"))
+
+y <- ggplot(data = NULL, aes(x= time, y = CI.3)) + 
+      geom_step(data = ci.m, aes(color = 'Male')) +
+      geom_step(data = ci.f, aes(color = 'Female')) +
+  labs(title = 'Cancer') + xlab('Months of follow up') + ylab('Probability') + ylim(0, 0.1) +
+scale_colour_manual(name="Gender",
+    values=c(Male="red", Female="blue"))
+
+z <- ggplot(data = NULL, aes(x= time, y = CI.4)) + 
+      geom_step(data = ci.m, aes( color = 'Male')) +
+      geom_step(data = ci.f, aes( color = 'Female')) +
+  labs(title = 'Other causes') + xlab('Months of follow up') + ylab('Probability') + ylim(0, 0.1) +
+scale_colour_manual(name="Gender",
+    values=c(Male="red", Female="blue"))
+
+
+grid.arrange(x, y, z, nrow=1, ncol=3)
+
+
+
+## DIABETES
+ci <- Cuminc(data_complete$time, as.numeric
+             (data_complete$status),
+             group = data_complete$DIQ010)
+
+ci.yes <- ci[ci$group == "Yes", ] 
+ci.no <- ci[ci$group == "No", ]
+
+#Plot
+
+x <- ggplot(data = NULL, aes(x= time, y = CI.2)) + 
+      geom_step(data = ci.yes, aes(color = 'Yes')) +
+      geom_step(data = ci.no, aes(color = 'No')) +
+  labs(title = 'Heart disease') + xlab('Months of follow up') + ylab('Probability') + ylim(0, 0.1) +
+scale_colour_manual(name="DIQ010",
+    values=c(Yes="red", No="blue"))
+
+y <- ggplot(data = NULL, aes(x= time, y = CI.3)) + 
+      geom_step(data = ci.yes, aes(color = 'Yes')) +
+      geom_step(data = ci.no, aes(color = 'No')) +
+  labs(title = 'Cancer') + xlab('Months of follow up') + ylab('Probability') + ylim(0, 0.1) +
+scale_colour_manual(name="DOQ010",
+    values=c(Yes="red", No="blue"))
+
+z <- ggplot(data = NULL, aes(x= time, y = CI.4)) + 
+      geom_step(data = ci.yes, aes(color = 'Yes')) +
+      geom_step(data = ci.no, aes(color = 'No')) +
+  labs(title = 'Other causes') + xlab('Months of follow up') + ylab('Probability') + ylim(0, 0.1) +
+scale_colour_manual(name="DIQ010",
+    values=c(Yes="red", No="blue"))
+
+grid.arrange(x, y, z, nrow=1, ncol=3)
+
+
+
+
+
+## SMOKE
+ci <- Cuminc(data_complete$time, as.numeric
+             (data_complete$status),
+             group = data_complete$SMQ020)
+
+ci.yes <- ci[ci$group == "Yes", ] 
+ci.no <- ci[ci$group == "No", ]
+
+
+#Plot
+
+x <- ggplot(data = NULL, aes(x= time, y = CI.2)) + 
+      geom_step(data = ci.yes, aes(color = 'Yes')) +
+      geom_step(data = ci.no, aes(color = 'No')) +
+  labs(title = 'Heart disease') + xlab('Months of follow up') + ylab('Probability') + ylim(0, 0.1) +
+scale_colour_manual(name="SMQ020",
+    values=c(Yes="red", No="blue"))
+
+y <- ggplot(data = NULL, aes(x= time, y = CI.3)) + 
+      geom_step(data = ci.yes, aes(color = 'Yes')) +
+      geom_step(data = ci.no, aes(color = 'No')) +
+  labs(title = 'Cancer') + xlab('Months of follow up') + ylab('Probability') + ylim(0, 0.1) +
+scale_colour_manual(name="SMQ020",
+    values=c(Yes="red", No="blue"))
+
+z <- ggplot(data = NULL, aes(x= time, y = CI.4)) + 
+      geom_step(data = ci.yes, aes(color = 'Yes')) +
+      geom_step(data = ci.no, aes(color = 'No')) +
+  labs(title = 'Other causes') + xlab('Months of follow up') + ylab('Probability') + ylim(0, 0.1) +
+scale_colour_manual(name="SMQ020",
+    values=c(Yes="red", No="blue"))
+
+grid.arrange(x, y, z, nrow=1, ncol=3)
+
+```
+
+
+
+
+## Diagnostics - Proportionality assumption
+
+### Fine-Gray model Schoenfeld residuals
+
+```{r}
+### Fine-Gray
+
+# Schoenfeld residual plots with smoother:
+# If the residuals do not have a constant mean across time the proportional hazards assumption is violated.
+
+
+# cause 1
+
+
+datafgcoxph <- data_complete %>% mutate(status = factor(status))
+data_h <- finegray(Surv(time, status) ~ ., id = SEQN, data=datafgcoxph)
+
+summary(data_h)
+
+fgc1 <- coxph(Surv(fgstart, fgstop, fgstatus) ~ RIDAGEYR + RIAGENDR + BMXBMI + LBDLDL + DIQ010 + BPXSY1 + SMQ020,
+                     weight=fgwt, data=data_h)
+summary(fgc1)
+
+# cause 2
+data_c <- finegray(Surv(time, status) ~ ., id = SEQN, etype = '2', data=datafgcoxph)
+
+fgc2 <- coxph(Surv(fgstart, fgstop, fgstatus) ~ RIDAGEYR + RIAGENDR + BMXBMI + LBDLDL + DIQ010 + BPXSY1 + SMQ020,
+                     weight=fgwt, data=data_c)
+summary(fgc2)
+
+# cause 3
+data_o <- finegray(Surv(time, status) ~ ., id = SEQN, etype = '3', data=datafgcoxph)
+
+fgc3 <- coxph(Surv(fgstart, fgstop, fgstatus) ~ RIDAGEYR + RIAGENDR + BMXBMI + LBDLDL + DIQ010 + BPXSY1 + SMQ020,
+                     weight=fgwt, data=data_o)
+summary(fgc3)
+
+
+temp <- cox.zph(fgc1)
+temp2 <- cox.zph(fgc2)
+temp3 <- cox.zph(fgc3)
+print(temp)   
+
+# plot curves
+
+par(mfrow = c(2,4))
+
+names = c('Age', 'Gender', 'BMI', 'LDL', 'Diabetes', 'Blood pressure', 'Smoking')
+
+for(j in 1:7)
+  plot(temp[j], resid = T, se = T, main = names[j],
+                 xlab = 'Time',
+                 ylab = 'Residuals')
+
+par(mfrow = c(2,4))
+for(j in 1:7)
+  plot(temp2[j], resid = T, se = T, main = names[j],
+                 xlab = 'Time',
+                 ylab = 'Residuals')
+
+
+par(mfrow = c(2,4))
+for(j in 1:7)
+  plot(temp3[j], resid = T, se = T, main = names[j],
+                 xlab = 'Time',
+                 ylab = 'Residuals')
+```
+
+
+### Cox model Schoenfeld residuals
+
+```{r}
+
+
+
+# Proportional hazards assumption
+c1 <- coxph(Surv(time,status==1)~  RIDAGEYR + RIAGENDR + BMXBMI + LBDLDL + DIQ010 + BPXSY1 + SMQ020, data = data_short)
+
+temp <- cox.zph(c1)
+print(temp)   
+
+# plot curves
+
+par(mfrow = c(2,4))
+
+names = c('Age', 'Gender', 'BMI', 'LDL', 'Diabetes', 'Blood pressure', 'Smoking')
+
+for(j in 1:7)
+  plot(temp[j], resid = T, se = T, main = names[j],
+                 xlab = 'Time',
+                 ylab = 'Residuals')
+
+c2 <- coxph(Surv(time,status==2)~  RIDAGEYR + RIAGENDR + BMXBMI + LBDLDL + DIQ010 + BPXSY1 + SMQ020, data = data_short)
+temp2 <- cox.zph(c2)
+
+# plot curves
+par(mfrow = c(2,4))
+for(j in 1:7)
+  plot(temp2[j], resid = T, se = T, main = names[j],
+                 xlab = 'Time',
+                 ylab = 'Residuals')
+
+c3 <- coxph(Surv(time,status==3)~  RIDAGEYR + RIAGENDR + BMXBMI + LBDLDL + DIQ010 + BPXSY1 + SMQ020, data = data_short)
+temp3 <- cox.zph(c3)
+par(mfrow = c(2,4))
+for(j in 1:7)
+  plot(temp3[j], resid = T, se = T, main = names[j],
+                 xlab = 'Time',
+                 ylab = 'Residuals')
+```
+
+To obtain the Schoenfeld residuals to check the proportionality assumptions for the Cox and Fine-Gray models above, the `cox.zph` funtion was used from the `survival` package [6].
+
+
+
+## Simpler models with fewer covariates
+
+```{r}
+## Try fitting models with just age, gender and one other covariate to check if significant...
+
+
+#######################################################################
+########### COX MODEL
+
+cox_mod <- coxph(Surv(time, status) ~ RIDAGEYR.1 + RIDAGEYR.2 +  RIDAGEYR.3  + RIAGENDRFemale.1 + RIAGENDRFemale.2 + RIAGENDRFemale.3  + BMXBMI.1 + BMXBMI.2 + BMXBMI.3  + LBDLDL.1 + LBDLDL.2 + LBDLDL.3 + DIQ010Borderline.1 + DIQ010Borderline.2 + DIQ010Borderline.3 + DIQ010Yes.1 + DIQ010Yes.2 + DIQ010Yes.3 + BPXSY1.1 + BPXSY1.2 + BPXSY1.3 + SMQ020Yes.1 + SMQ020Yes.2 + SMQ020Yes.3 + strata(trans), data = data_long)
+
+summary(cox_mod)
+
+##### BMI
+
+c_bmi <- coxph(Surv(time, status) ~ RIDAGEYR.1 + RIDAGEYR.2 +  RIDAGEYR.3  + RIAGENDRFemale.1 + RIAGENDRFemale.2 + RIAGENDRFemale.3  + BMXBMI.1 + BMXBMI.2 + BMXBMI.3 + strata(trans), data = data_long)
+
+summary(c_bmi)
+
+# BMI not significant - only on cancer at 10% level
+
+
+
+
+
+##### LDL
+
+c_ldl <- coxph(formula = Surv(time, status) ~ RIDAGEYR.1 + RIDAGEYR.2 + 
+    RIDAGEYR.3 + RIAGENDRFemale.1 + RIAGENDRFemale.2 + RIAGENDRFemale.3 + LBDLDL.1 + LBDLDL.2 + LBDLDL.3 + strata(trans), data = data_long)
+
+summary(c_ldl)
+
+# LDL coefficients similar to in full model
+
+
+
+
+#### Diabetes
+
+c_diabetes <- coxph(formula = Surv(time, status) ~ RIDAGEYR.1 + RIDAGEYR.2 + 
+    RIDAGEYR.3 + RIAGENDRFemale.1 + RIAGENDRFemale.2 + RIAGENDRFemale.3 + 
+    DIQ010Yes.1 + DIQ010Yes.2 + DIQ010Yes.3 + DIQ010Borderline.1 + 
+    DIQ010Borderline.2 + DIQ010Borderline.3 + strata(trans), 
+    data = data_long)
+
+summary(c_diabetes)
+# Similar to full model
+
+
+
+
+
+
+
+##### Smoking
+
+c_smoke <- coxph(formula = Surv(time, status) ~ RIDAGEYR.1 + RIDAGEYR.2 + 
+    RIDAGEYR.3 + RIAGENDRFemale.1 + RIAGENDRFemale.2 + RIAGENDRFemale.3 + 
+    SMQ020Yes.1 + SMQ020Yes.2 + SMQ020Yes.3 + strata(trans), 
+    data = data_long)
+
+summary(c_smoke)
+
+# Similar to in full model
+
+
+
+
+
+### Blood pressure
+
+c_bp <- coxph(formula = Surv(time, status) ~ RIDAGEYR.1 + RIDAGEYR.2 + 
+    RIDAGEYR.3 + RIAGENDRFemale.1 + RIAGENDRFemale.2 + RIAGENDRFemale.3 + 
+    BPXSY1.1 + BPXSY1.2 + BPXSY1.3 + strata(trans), 
+    data = data_long)
+
+
+summary(c_bp)
+```
+
+
+## Alternative approach to apply Fine-Gray model
+
+
+To calculate the weights for the Fine-Gray model the `finegray()` function was used below [7].
+
+
+```{r}
+
+### Fitting Fine - Gray model using coxph():
+
+
+heart_fgdat <- finegray(Surv(time, cause) ~ ., data=data_complete,
+etype="heart")
+
+summary(heart_fgdat)
+
+dim(heart_fgdat)
+
+summary(data_complete)
+
+
+
+fgfit_heart <- coxph(Surv(fgstart, fgstop, fgstatus) ~ RIAGENDR + RIDAGEYR + BMXBMI+ LBDLDL + DIQ010+ BPXSY1 + SMQ020, data=heart_fgdat, weight= fgwt)
+
+summary(fgfit_heart)
+
+
+```
+
+
+
+
+# 3: Pseudo-value Approach
+
+The code used below to implement the pseudo-value approach was adapted from a tutorial by Klein et al. on producing pseudo-value estimates using the `pseudo` package in R [8].
+
+
+
+### Select grid of 5 time points
+
+```{r}
+library(pseudo)
+
+data_pseudo <- data_complete[data_complete$status != 0, ]
+
+data_pseudo <- data_pseudo %>% 
+  mutate(status = as.integer(status)-1)
+
+skim(data_pseudo)
+summary(data_pseudo$status)
+
+
+# Vector of 5-10 evenly spaced time points on the event scale - to find pseudo-values at
+
+
+# Quantiles
+quantile(data_pseudo$time, probs = c(0.2,0.4,0.6,0.8,1) )
+
+t_pts <- quantile(data_pseudo$time, probs = c(0.2,0.4,0.6,0.8,1) )
+
+data_pseudo <- data_complete %>% 
+  mutate(status = as.integer(status)-1)
+
+summary(data_pseudo)
+```
+
+
+### Estimate pseudovalues for each individual
+```{r}
+
+pseudo <- pseudoci(time = data_pseudo$time, event = data_pseudo$status, tmax = t_pts)
+
+dim(pseudo$pseudo$cause1)
+
+
+# HEart
+b <- NULL
+for(it in 1:length(pseudo$time)){
+	b <- rbind(b,cbind(data_pseudo,pseudo = pseudo$pseudo$cause1[,it],
+	     tpseudo = pseudo$time[it],id=1:nrow(data_pseudo)))
+}
+b <- b[order(b$id),]
+
+b$tpseudo <- factor(b$tpseudo)
+skim(b$pseudo)
+
+
+# fit the model
+library(geepack)
+
+
+##### HEART
+fit_heart <- geese(pseudo ~ tpseudo + RIDAGEYR + RIAGENDR + BMXBMI + LBDLDL + DIQ010 + BPXSY1 + SMQ020, data =b, id=id, jack = TRUE, scale.fix=TRUE, family=gaussian,
+	mean.link = "cloglog", corstr="independence")
+
+
+#The results using the AJ variance estimate
+h1 <- cbind(mean = round(fit_heart$beta,4), SD = round(sqrt(diag(fit_heart$vbeta.ajs)),4),
+	Z = round(fit_heart$beta/sqrt(diag(fit_heart$vbeta.ajs)),4),
+	PVal = round(2-2*pnorm(abs(fit_heart$beta/sqrt(diag(fit_heart$vbeta.ajs)))),4))
+
+# Logit link
+fit_heart2 <- geese(pseudo ~ as.factor(tpseudo) + RIDAGEYR + RIAGENDR + BMXBMI + LBDLDL + DIQ010 + BPXSY1 + SMQ020, data =b, id=id, jack = TRUE, scale.fix=TRUE, family=gaussian,
+	mean.link = "logit", corstr="independence")
+
+
+#The results using the AJ variance estimate
+h2 <- cbind(mean = round(fit_heart2$beta,4), SD = round(sqrt(diag(fit_heart2$vbeta.ajs)),4),
+	Z = round(fit_heart2$beta/sqrt(diag(fit_heart2$vbeta.ajs)),4),
+	PVal = round(2-2*pnorm(abs(fit_heart2$beta/sqrt(diag(fit_heart2$vbeta.ajs)))),4))
+
+
+
+
+
+# One covariate
+fit_heart_diabetes <- geese(pseudo ~ tpseudo + SMQ020, data =b, id=id, jack = TRUE, scale.fix=TRUE, family=gaussian,
+	mean.link = "cloglog", corstr="independence")
+
+
+#The results using the AJ variance estimate
+h1.diab <- cbind(mean = round(fit_heart_diabetes$beta,4), SD = round(sqrt(diag(fit_heart_diabetes$vbeta.ajs)),4),
+	Z = round(fit_heart_diabetes$beta/sqrt(diag(fit_heart_diabetes$vbeta.ajs)),4),
+	PVal = round(2-2*pnorm(abs(fit_heart_diabetes$beta/sqrt(diag(fit_heart_diabetes$vbeta.ajs)))),4))
+
+h1.diab
+
+
+
+
+
+#### Cancer
+
+c <- NULL
+for(it in 1:length(pseudo$time)){
+	c <- rbind(c,cbind(data_pseudo,pseudo = pseudo$pseudo$cause2[,it],
+	     tpseudo = pseudo$time[it],id=1:nrow(data_pseudo)))
+}
+c <- c[order(c$id),]
+
+skim(c)
+
+fit_cancer <- geese(pseudo ~ as.factor(tpseudo) + RIDAGEYR + RIAGENDR + BMXBMI + LBDLDL + DIQ010 + BPXSY1 + SMQ020, data =c, id=id, jack = TRUE, scale.fix=TRUE, family=gaussian,
+	mean.link = "cloglog", corstr="independence")
+
+
+#The results using the AJ variance estimate
+c1 <- cbind(mean = round(fit_cancer$beta,3), SD = round(sqrt(diag(fit_cancer$vbeta.ajs)),3),
+	Z = round(fit_cancer$beta/sqrt(diag(fit_cancer$vbeta.ajs)),3),
+	PVal = round(2-2*pnorm(abs(fit_cancer$beta/sqrt(diag(fit_cancer$vbeta.ajs)))),3))
+
+fit_cancer2 <- geese(pseudo ~ as.factor(tpseudo) + RIDAGEYR + RIAGENDR + BMXBMI + LBDLDL + DIQ010 + BPXSY1 + SMQ020, data =c, id=id, jack = TRUE, scale.fix=TRUE, family=gaussian,
+	mean.link = "logit", corstr="independence")
+
+#The results using the AJ variance estimate
+c2 <- cbind(mean = round(fit_cancer2$beta,3), SD = round(sqrt(diag(fit_cancer2$vbeta.ajs)),3),
+	Z = round(fit_cancer2$beta/sqrt(diag(fit_cancer2$vbeta.ajs)),3),
+	PVal = round(2-2*pnorm(abs(fit_cancer2$beta/sqrt(diag(fit_cancer2$vbeta.ajs)))),3))
+
+#### OTHER CAUSES
+
+d <- NULL
+for(it in 1:length(pseudo$time)){
+	d <- rbind(d,cbind(data_pseudo,pseudo = pseudo$pseudo$cause3[,it],
+	     tpseudo = pseudo$time[it],id=1:nrow(data_pseudo)))
+}
+d <- d[order(d$id),]
+
+skim(d)
+
+fit_other <- geese(pseudo ~ as.factor(tpseudo) + RIDAGEYR + RIAGENDR + BMXBMI + LBDLDL + DIQ010 + BPXSY1 + SMQ020, data = d, id=id, jack = TRUE, scale.fix=TRUE, family=gaussian,
+	mean.link = "cloglog", corstr="independence")
+
+
+#The results using the AJ variance estimate
+o1 <- cbind(mean = round(fit_other$beta,3), SD = round(sqrt(diag(fit_other$vbeta.ajs)),3),
+	Z = round(fit_other$beta/sqrt(diag(fit_other$vbeta.ajs)),3),
+	PVal = round(2-2*pnorm(abs(fit_other$beta/sqrt(diag(fit_other$vbeta.ajs)))),4))
+
+fit_other2 <- geese(pseudo ~ as.factor(tpseudo) + RIDAGEYR + RIAGENDR + BMXBMI + LBDLDL + DIQ010 + BPXSY1 + SMQ020, data = d, id=id, jack = TRUE, scale.fix=TRUE, family=gaussian,
+	mean.link = "logit", corstr="independence")
+
+o2 <- cbind(mean = round(fit_other2$beta,3), SD = round(sqrt(diag(fit_other2$vbeta.ajs)),3),
+	Z = round(fit_other2$beta/sqrt(diag(fit_other2$vbeta.ajs)),3),
+	PVal = round(2-2*pnorm(abs(fit_other2$beta/sqrt(diag(fit_other2$vbeta.ajs)))),4))
+```
+
+
+## Print pseudo-value approach results
+
+```{r}
+th1 <- data.frame(covariate = h1[,0], estimate = h1[,1], se = h1[,2], p = h1[,4])
+
+th2 <- data.frame(covariate = h2[,0], estimate = h2[,1], se = h2[,2], p = h2[,4])
+
+tc1 <- data.frame(covariate = c1[,0], estimate = c1[,1], se = c1[,2], p = c1[,4])
+
+tc2 <- data.frame(covariate = c2[,0], estimate = c2[,1], se = c2[,2], p = c2[,4])
+
+to1 <- data.frame(covariate = o1[,0], estimate = o1[,1], se = o1[,2], p = o1[,4])
+
+to2 <- data.frame(covariate = o2[,0], estimate = o2[,1], se = o2[,2], p = o2[,4])
+
+th1
+th2
+tc1
+tc2
+to1
+to2
+```
+
+
+
+
+
+
+## References
+
+[1] Centers for Disease Control and Prevention (CDC). National Center for Health Statistics (NCHS). National Health and Nutrition Examination Survey Data. Hyattsville, MD: U.S. Department of Health and Human Services, Centers for Disease Control and Prevention, 2005-2006. Available: https://wwwn.cdc.gov/nchs/nhanes/ContinuousNhanes/Default.aspx?BeginYear=2005.
+
+[2] National Center for Health Statistics. Office of Analysis and Epidemiology, Public-use Linked
+Mortality File, 2015. Hyattsville, Maryland. (Available at the following address:
+https://www.cdc.gov/nchs/data-linkage/mortality-public.htm).
+
+[3] C.J.Endres,"Introducing nhanesA",[Online], October 16 2018. Available: https://cran.r-project.org/web/packages/nhanesA/vignettes/Introducing_nhanesA.html
+
+[4] H. Putter, "Tutorial in biostatistics: Competing risks and multi-state models Analyses using the mstate package", [Online], May 30, 2014. Available:  http://citeseerx.ist.psu.edu/viewdoc/download?doi=10.1.1.487.3943&rep=rep1&type=pdf 
+
+[5] L. Scrucca, A. Santucci, and F. Aversa, "Regression modeling of competing risk using R: an in depth guide for clinicians," Bone Marrow Transplantation, vol. 45, no. 9, pp. 1388-1395, 2010, doi: 10.1038/bmt.2009.359.
+
+[6] T. Therneau, "A package for survival analysis in R",[Online], June 12 2020. Available: https://cran.r-project.org/web/packages/survival/vignettes/survival.pdf
+
+[7] T. Therneau, C. Crowson, and E. Atkinson, "Multi-state models and competing risks",[Online], June 12 2020. Available: https://cran.r-project.org/web/packages/survival/vignettes/compete.pdf
+
+[8] J. P. Klein, M. Gerster, P. K. Andersen, S. Tarima, and M. P. Perme, "SAS and R functions to compute pseudo-values for censored data regression," Computer Methods and Programs in Biomedicine, vol. 89, no. 3, pp. 289-300, 2007, doi: 10.1016/j.cmpb.2007.11.017.
+
+
