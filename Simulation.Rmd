@@ -1,0 +1,1085 @@
+---
+title: "4: Simulation Study"
+date: "07/07/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r packages, message = FALSE, warning=FALSE}
+# Load packages
+library(survival)
+library(tidyverse)
+library(mstate)
+library(cmprsk)
+library(gridExtra)
+library(pseudo)
+```
+
+
+
+## Data Generation
+
+```{r}
+set.seed(12345)
+
+# Participants
+n <- 100000
+
+### Simulate covariates
+gender <- rbinom(n, 1, 0.5)
+summary(gender)
+
+# 0 = female, 1 = male
+
+### Simulate competing risks
+# k = 2 causes of failure
+
+Btz1 <- 0.1*gender
+Btz2 <- 0.7*gender
+
+
+# Proportional cs hazards
+cshr1 <- 0.1*exp(Btz1)
+cshr2 <- 0.1*exp(Btz2)
+
+# Latent failure times
+time1 <- rexp(n, rate = cshr1)
+time2 <- rexp(n, rate = cshr2)
+
+hist(time1)
+hist(time2)
+
+summary(time1)
+summary(time2)
+
+
+# Status 
+# 1 if time 1 first, 2 if time 2 is first
+epsilon <- 1*(time1<time2) + 2*(time1>time2)
+
+
+# Calculate the observed times
+time <- time1
+time[epsilon == 2] <- time2[epsilon == 2]
+
+
+
+### Simulate censoring
+# Drop out times:
+cens <- rexp(n, rate = 0.1)
+
+summary(1*(time > cens)) # Is it censored?
+
+epsilon[time > cens] <- 0
+time[time>cens] <- cens[time>cens]
+
+
+summary(time)
+hist(time)
+
+# Set max follow up time to 20
+tmax <- 20
+sum(1*(time > tmax))
+
+# Censor individuals not dead by tmax
+epsilon[time > tmax] <- 0
+time[time > tmax] <- tmax
+
+summary(time)
+hist(time)
+
+
+# Generated dataset:
+data1 <- data.frame(time, epsilon, gender)
+
+summary(data1)
+head(data1)
+
+data1 <- data1 %>% mutate(epsilon = as.integer(epsilon))
+
+causes <- data.frame(epsilon=c(0, 1, 2), cause = c("event-free", "cause1", "cause2"))
+
+data1 <- merge(data1, causes, by = "epsilon")
+head(data1)
+
+table(data1$epsilon)
+```
+
+
+## Non-parametric estimator
+
+```{r}
+
+cif0 <- Cuminc(time = "time", status = "epsilon", data = data1 %>% select(time, epsilon))
+
+head(cif0)
+
+# Plot
+ggplot(cif0) + 
+      geom_step(aes(x = time, y = CI.1, color = 'Cause1')) +
+      geom_step(aes(x = time, y = CI.2, color = 'Cause2'))  + 
+  labs(title = 'Aalen-Johansen Estimator') + xlab('Time') + ylab('CIF') + ylim(0,1) +
+scale_colour_manual(name="Cause",
+    values=c(Cause1="red", Cause2="blue"))
+
+
+## GENDER
+cif00 <- Cuminc(data1$time, as.numeric
+             (data1$epsilon),
+             group = data1$gender)
+
+ci.m <- cif00[cif00$group == 1, ] 
+ci.f <- cif00[cif00$group == 0, ]
+head(ci.f)
+
+#Plot
+p11 <- ggplot(data = NULL, aes(x= time, y = CI.1)) + 
+      geom_step(data = ci.m, aes(color = 'Male')) +
+      geom_step(data = ci.f, aes(color = 'Female')) +
+  labs(title = 'Cause1') + xlab('Time') + ylab('Probability') + ylim(0, 1) +
+scale_colour_manual(name="Gender",
+    values=c(Male="red", Female="blue"))
+
+p22 <- ggplot(data = NULL, aes(x= time, y = CI.2)) + 
+      geom_step(data = ci.m, aes(color = 'Male')) +
+      geom_step(data = ci.f, aes(color = 'Female')) +
+  labs(title = 'Cause2') + xlab('Time') + ylab('Probability') + ylim(0, 1) + scale_colour_manual(name="Gender",
+    values=c(Male="red", Female="blue"))
+
+grid.arrange(p11, p22, nrow=1, ncol=2, top = "Aalen-Johansen estimator - Beta 1 = 0.1, Beta 2 = -0.7")
+```
+
+
+## Cox model
+
+The code below on obtaining Cox model estimates using the `mstate` package is based on a tutorial by H.Putter [1].
+
+```{r}
+# Competing risk transition matrix
+tmat <- trans.comprisk(2, names = c("event-free", "cause1", "cause2"))
+
+data_wide <- data1
+# Indicator columns for each of the 2 causes of deaths
+data_wide$stat1 <- as.numeric(data_wide$epsilon == 1) 
+data_wide$stat2 <- as.numeric(data_wide$epsilon == 2)
+
+head(data_wide)
+
+# Convert data into long format using msprep:
+data_long <- msprep(time = c(NA, "time", "time"), status = c(NA, "stat1", "stat2"), data = data_wide, keep = c("gender"), trans = tmat)
+
+tail(data_long)
+
+# Check number of events same as before:
+events(data_long)
+
+
+# Add cause-specific covariates for regression:
+data_long <- expand.covs(data_long, covs = c("gender"))
+
+head(data_long)
+
+
+# Fit Cox propotional hazards model
+c1 <- coxph(Surv(time, status) ~ gender.1 + gender.2 + strata(trans), data = data_long)
+
+summary(c1)
+
+
+Male <- data.frame(gender.1 = c(1,0), gender.2 = c(0,1), 
+                   trans = c(1, 2), strata = c(1, 2))
+Female <- data.frame(gender.1 = c(0,0), gender.2 = c(0,0),
+                     trans = c(1, 2), strata = c(1, 2))
+# Estimated cumulative hazards for all event times
+msf.Male <- msfit(c1, Male, trans = tmat)
+msf.Female <- msfit(c1, Female, trans = tmat)
+# Caluculates Cumulative Incidence
+pt.Male <- probtrans(msf.Male, 0)[[1]]
+pt.Female <- probtrans(msf.Female, 0)[[1]]
+# Plot
+# Cause 1
+plot1 <- ggplot(NULL, aes(x = time, y = pstate2)) + 
+      geom_step(data = pt.Male, aes(color = 'Male')) +
+      geom_step(data = pt.Female, aes(color = 'Female')) + labs(title = 'Cause 1') + xlab('Time') + ylab('Probability') + ylim(0,1) + scale_colour_manual(name="Gender",
+    values=c(Male="red", Female="blue"))
+
+# Cause 2
+plot12 <- ggplot(NULL, aes(x = time, y = pstate3)) + 
+      geom_step(data = pt.Male, aes(color = 'Male')) +
+      geom_step(data = pt.Female, aes(color = 'Female')) + labs(title = 'Cause 2') + xlab('Time') + ylab('Probability') + ylim(0,1) + scale_colour_manual(name="Gender",
+    values=c(Male="red", Female="blue"))
+
+grid.arrange(plot1, plot12, nrow=1, ncol=2, top = "Cox model -  Beta 1 = 0.1, Beta 2 = -0.7")
+
+coxc1 <- coxph(Surv(time,epsilon==1)~  gender, data = data1)
+coxc2 <- coxph(Surv(time,epsilon==2)~  gender, data = data1)
+
+coxc1
+coxc2
+
+
+# Proportional hazards assumption
+temp01 <- cox.zph(coxc1)
+
+# plot curves
+
+par(mfrow = c(1,2))
+
+plot(temp01, resid = T, se = T, main = 'Cause 1',
+                 xlab = 'Time',
+                 ylab = 'Schoenfeld Residuals')
+temp02 <- cox.zph(coxc2)
+
+plot(temp02, resid = T, se = T, main = 'Cause 2',
+                 xlab = 'Time',
+                 ylab = 'Schoenfeld Residuals')
+```
+
+
+To check the proportionality assumption in the Cox and Fine-Gray models, the `cox.zph` funtion from the survival package was used [2].
+
+
+
+
+
+
+
+
+## Fine and Gray Model
+
+### Data generation
+
+```{r}
+# Data for Fine-Gray method - same as before with fewer participants
+set.seed(12345)
+
+# Participants
+n <- 10000
+
+### Simulate covariates as before
+gender <- rbinom(n, 1, 0.5)
+summary(gender)
+
+# 0 = female, 1 = male
+
+### Simulate competing risks
+# k = 2 causes of failure
+
+Btz1 <- 0.1*gender
+Btz2 <- 0.7*gender
+
+
+# Proportional cs hazards
+cshr1 <- 0.1*exp(Btz1)
+cshr2 <- 0.1*exp(Btz2)
+
+# Latent failure times
+time1 <- rexp(n, rate = cshr1)
+time2 <- rexp(n, rate = cshr2)
+
+
+
+# Status 
+# 1 if time 1 first, 2 if time 2 is first
+epsilon <- 1*(time1<time2) + 2*(time1>time2)
+
+
+# Calculate the observed times
+time <- time1
+time[epsilon == 2] <- time2[epsilon == 2]
+
+
+
+### Simulate censoring
+# Drop out times:
+cens <- rexp(n, rate = 0.1)
+
+
+epsilon[time > cens] <- 0
+time[time>cens] <- cens[time>cens]
+
+
+# Set max follow up time to 20
+tmax <- 20
+sum(1*(time > tmax))
+
+# Censor individuals not dead by tmax
+epsilon[time > tmax] <- 0
+time[time > tmax] <- tmax
+
+
+# Generated dataset:
+data1 <- data.frame(time, epsilon, gender)
+
+
+data1 <- data1 %>% mutate(epsilon = as.integer(epsilon))
+
+causes <- data.frame(epsilon=c(0, 1, 2), cause = c("event-free", "cause1", "cause2"))
+
+data1 <- merge(data1, causes, by = "epsilon")
+```
+
+To obtain the weights for the Fine-Gray model, the `finegray` funtion was used [3].
+
+
+### Fine-Gray estimates
+```{r}
+
+###### using weighted coxph()
+
+# cause 1
+
+data10 <- data1 %>% mutate(epsilon = factor(epsilon))
+data_c1 <- finegray(Surv(time, epsilon) ~ ., data=data10)
+
+fgc1 <- coxph(Surv(fgstart, fgstop, fgstatus) ~ gender,
+                     weight=fgwt, data=data_c1)
+summary(fgc1)
+
+# cause 2
+
+data_c2 <- finegray(Surv(time, epsilon) ~ ., data=data10, etype = '2')
+
+fgc2 <- coxph(Surv(fgstart, fgstop, fgstatus) ~ gender,
+                     weight=fgwt, data=data_c2)
+summary(fgc2)
+
+
+
+#plot
+
+ndata <- data.frame(gender=c(1,0))
+fgsurv1 <- survfit(fgc1, ndata)
+fgsurv2 <- survfit(fgc2, ndata)
+
+
+cif1 <- data.frame(time = fgsurv1$time, m = 1-fgsurv1$surv[,1], f = 1-fgsurv1$surv[,2])
+
+cif2 <- data.frame(time = fgsurv2$time, m = 1-fgsurv2$surv[,1], f = 1-fgsurv2$surv[,2])
+
+p1 <- ggplot(cif1) + 
+      geom_step( aes(x = time, y = m, color = 'Male')) +
+      geom_step(aes(x = time, y = f, color = 'Female')) +
+  labs(title = 'Cause 1') + xlab('Time') + ylab('Probability') + ylim(0, 1) +
+scale_colour_manual(name="Gender",
+    values=c(Male="red", Female="blue"))
+
+p2 <- ggplot(cif2) + 
+      geom_step( aes(x = time, y = m, color = 'Male')) +
+      geom_step(aes(x = time, y = f, color = 'Female')) +
+  labs(title = 'Cause 1') + xlab('Time') + ylab('Probability') + ylim(0, 1) +
+scale_colour_manual(name="Gender",
+    values=c(Male="red", Female="blue"))
+
+grid.arrange(p1, p2, nrow=1, ncol=2, top = "Fine-Gray model -  Beta 1 = 0.1, Beta 2 = -0.7")
+
+```
+
+
+### Fine-Gray Diagnostics
+```{r}
+
+# Proportional hazards assumption
+temp <- cox.zph(fgc1)
+print(temp)   # display the results 
+
+# plot curves
+
+par(mfrow = c(1,2))
+
+plot(temp, resid = T, se = T, main = 'Cause 1',
+                 xlab = 'Time',
+                 ylab = 'Schoenfeld Residuals')
+
+temp2 <- cox.zph(fgc2)
+
+# plot curves
+
+plot(temp2, resid = T, se = T, main = 'Cause 2',
+                 xlab = 'Time',
+                 ylab = 'Schoenfeld Residuals')
+
+
+```
+
+
+
+### Fine-Gray model - Time-varying covariate
+
+```{r}
+# Misspecified Fine-Gray model? Time-varying covariate.
+
+
+# Cause 1
+data_inter1 <- finegray(Surv(time, epsilon) ~ gender + gender*time, data=data10)
+
+fg_inter1 <- coxph(Surv(fgstart, fgstop, fgstatus) ~ gender + gender*time, weight=fgwt, data=data_inter1)
+
+summary(fg_inter1)
+
+# Cause 2
+data_inter2 <- finegray(Surv(time, epsilon) ~ gender + gender*time, etype = '2', data=data10)
+
+fg_inter2 <- coxph(Surv(fgstart, fgstop, fgstatus) ~ gender + gender*time, weight=fgwt, data=data_inter2)
+
+summary(fg_inter2)
+
+
+# Proportional hazards assumption
+temp <- cox.zph(fg_inter1)
+print(temp)   # display the results 
+
+par(mfrow = c(1,2))
+# plot curves
+plot(temp, residuals = T, se = T, var =1, main = 'Cause 1', xlab = 'Time',
+                 ylab = 'Schoenfeld Residuals')
+
+
+temp2 <- cox.zph(fg_inter2)
+plot(temp2, residuals = T, se = T, var = 1, main = 'Cause 2', xlab = 'Time',
+                 ylab = 'Schoenfeld Residuals')
+```
+
+
+### 'Misspecified' Fine-Gray model
+```{r}
+# Relationship between SDHR and CSHR:
+
+# Calculate cumulative incidences for z = 0 and z = 1 at set of times
+
+cif00 <- cuminc(data1$time, as.numeric
+             (data1$epsilon),
+             group = data1$gender)
+
+ci_ests <- timepoints(cif00, times = c( 1,2,3,4,5,6,7, 10, 12, 16, 20))$est
+
+ci_ests
+
+ci_ests[,2]
+
+SDHR <- function(b1 = 0.1, b2 = 0.7, tp=1) {
+  # function estimating the SDHR at a time point tp using the CSHR
+  
+  # survival for z = 1 and z = 0
+  S1 <- 1 - (ci_ests[,tp][2] + ci_ests[,tp][4])
+  S0 <- 1 - (ci_ests[,tp][1] + ci_ests[,tp][3])
+  
+  
+  # k=1
+  num1 <- 1 - ci_ests[,tp][1]
+  denom1 <- 1 - ci_ests[,tp][2]
+  
+  sdhr1 <- exp(b1)*(S1/S0)*(num1/denom1)
+  
+  # k=2
+  num2 <- 1 - ci_ests[,tp][3]
+  denom2 <- 1 - ci_ests[,tp][4]
+  
+  sdhr2 <- exp(b2)*(S1/S0)*(num2/denom2)
+  
+  sdhr <- c(sdhr1, sdhr2)
+  return(sdhr)
+}
+
+
+SDHR(tp = 1)
+SDHR(tp = 2)
+SDHR(tp = 3)
+SDHR(tp = 4)
+SDHR(tp = 5)
+SDHR(tp = 6)
+SDHR(tp = 7)
+SDHR(tp = 8)
+
+cos1 <- c(SDHR(t=1)[1], SDHR(t=2)[1], SDHR(t=3)[1], SDHR(t=4)[1], SDHR(t=5)[1], SDHR(t=6)[1], SDHR(t=7)[1], SDHR(t=8)[1], SDHR(t=9)[1], SDHR(t=10)[1],SDHR(t=11)[1])
+
+cos2 <- c(SDHR(t=1)[2], SDHR(t=2)[2], SDHR(t=3)[2], SDHR(t=4)[2], SDHR(t=5)[2], SDHR(t=6)[2], SDHR(t=7)[2], SDHR(t=8)[2], SDHR(t=9)[2], SDHR(t=10)[2],SDHR(t=11)[2])
+
+times = c(1,2,3,4,5,6,7,10, 12, 16, 20)
+
+truesdhr <- data.frame(times, cos1, cos2)
+
+
+
+ggplot(data = truesdhr) + 
+     geom_line(aes(x = times, y = cos1, color = 'Cause1')) +
+     geom_line(aes(x = times, y = cos2, color = 'Cause2')) +
+     labs(title = 'Sub-distribution hazard ratios over time') + xlab('Time') + ylab('SDHR') + ylim(0, 2) + scale_colour_manual(name="Outcomes", values=c(Cause1="red", Cause2="blue"))
+
+```
+
+
+
+## Pseudo-value approach
+
+### Generate data
+
+```{r}
+# Dataset for pseudovalue experiments - same as before but n=1000
+# Participants
+set.seed(12345)
+n <- 1000
+
+### Simulate covariates as before
+gender <- rbinom(n, 1, 0.5)
+summary(gender)
+
+# 0 = female, 1 = male
+
+### Simulate competing risks
+# k = 2 causes of failure
+
+Btz1 <- 0.1*gender
+Btz2 <- 0.7*gender
+
+
+# Proportional cs hazards
+cshr1 <- 0.1*exp(Btz1)
+cshr2 <- 0.1*exp(Btz2)
+
+# Latent failure times
+time1 <- rexp(n, rate = cshr1)
+time2 <- rexp(n, rate = cshr2)
+
+
+
+# Status 
+# 1 if time 1 first, 2 if time 2 is first
+epsilon <- 1*(time1<time2) + 2*(time1>time2)
+
+
+# Calculate the observed times
+time <- time1
+time[epsilon == 2] <- time2[epsilon == 2]
+
+
+
+### Simulate censoring
+# Drop out times:
+cens <- rexp(n, rate = 0.1)
+
+
+epsilon[time > cens] <- 0
+time[time>cens] <- cens[time>cens]
+
+
+# Set max follow up time to 20
+tmax <- 20
+sum(1*(time > tmax))
+
+# Censor individuals not dead by tmax
+epsilon[time > tmax] <- 0
+time[time > tmax] <- tmax
+
+
+# Generated dataset:
+data1 <- data.frame(time, epsilon, gender)
+
+
+data1 <- data1 %>% mutate(epsilon = as.integer(epsilon))
+
+causes <- data.frame(epsilon=c(0, 1, 2), cause = c("event-free", "cause1", "cause2"))
+
+data1 <- merge(data1, causes, by = "epsilon")
+```
+
+The code used below to implement the pseudo-value approach was adapted from a tutorial by Klein et al. on producing pseudo-value estimates using the `pseudo` package in R [4].
+
+
+```{r}
+
+head(data1)
+
+data_pseudo <- data1[data1$epsilon != 0, ]
+data_pseudo <- data_pseudo %>% 
+  mutate(epsilon = as.integer(epsilon))
+
+summary(data_pseudo$epsilon)
+
+
+# Vector of 5-10 evenly spaced time points on the event scale - to find pseudo-values at
+
+# Quantiles
+quantile(data_pseudo$time, probs = c(0.2,0.4,0.6,0.8,1) )
+
+t_pts <- quantile(data_pseudo$time, probs = c(0.2,0.4,0.6,0.8,1) )
+
+data_pseudo <- data1 %>% 
+  mutate(epsilon = as.integer(epsilon))
+
+pseudo <- pseudoci(time = data_pseudo$time, event = data_pseudo$epsilon, tmax = t_pts)
+
+# Cause1
+b <- NULL
+for(it in 1:length(pseudo$time)){
+	b <- rbind(b,cbind(data_pseudo,pseudo = pseudo$pseudo$cause1[,it],
+	     tpseudo = pseudo$time[it],id=1:nrow(data_pseudo)))
+}
+b <- b[order(b$id),]
+
+b$tpseudo <- factor(b$tpseudo)
+
+ggplot(b, aes(x = factor(tpseudo), y = pseudo)) + geom_boxplot()
+
+
+# fit the model
+library(geepack)
+
+
+##### CAUSE 1
+fit_c1 <- geese(pseudo ~ as.factor(tpseudo) + gender, data =b, id=id, jack = TRUE, scale.fix=TRUE, family=gaussian,
+	mean.link = "cloglog", corstr="independence")
+
+
+
+
+
+#The results using the AJ variance estimate
+h1 <- cbind(mean = round(fit_c1$beta,4), SD = round(sqrt(diag(fit_c1$vbeta.ajs)),4),
+	Z = round(fit_c1$beta/sqrt(diag(fit_c1$vbeta.ajs)),4),
+	PVal = round(2-2*pnorm(abs(fit_c1$beta/sqrt(diag(fit_c1$vbeta.ajs)))),4))
+
+# Logit link
+fit_c12 <- geese(pseudo ~ as.factor(tpseudo) + gender, data =b, id=id, jack = TRUE, scale.fix=TRUE, family=gaussian,
+	mean.link = "logit", corstr="independence")
+
+
+#The results using the AJ variance estimate
+h2 <- cbind(mean = round(fit_c12$beta ,4), SD = round(sqrt(diag(fit_c12$vbeta.ajs)),4),
+	Z = round(fit_c12$beta/sqrt(diag(fit_c12$vbeta.ajs)),4),
+	PVal = round(2-2*pnorm(abs(fit_c12$beta/sqrt(diag(fit_c12$vbeta.ajs)))),4))
+
+
+
+
+#### Cause 2
+
+c <- NULL
+for(it in 1:length(pseudo$time)){
+	c <- rbind(c,cbind(data_pseudo,pseudo = pseudo$pseudo$cause2[,it],
+	     tpseudo = pseudo$time[it],id=1:nrow(data_pseudo)))
+}
+c <- c[order(c$id),]
+
+
+fit_c2 <- geese(pseudo ~ as.factor(tpseudo) + gender, data =c, id=id, jack = TRUE, scale.fix=TRUE, family=gaussian,
+	mean.link = "cloglog", corstr="independence")
+
+
+#The results using the AJ variance estimate
+c1 <- cbind(mean = round(fit_c2$beta,3), SD = round(sqrt(diag(fit_c2$vbeta.ajs)),3),
+	Z = round(fit_c2$beta/sqrt(diag(fit_c2$vbeta.ajs)),3),
+	PVal = round(2-2*pnorm(abs(fit_c2$beta/sqrt(diag(fit_c2$vbeta.ajs)))),3))
+
+fit_c22 <- geese(pseudo ~ as.factor(tpseudo) + gender, data =c, id=id, jack = TRUE, scale.fix=TRUE, family=gaussian,
+	mean.link = "logit", corstr="independence")
+
+#The results using the AJ variance estimate
+c2 <- cbind(mean = round(fit_c22$beta,3), SD = round(sqrt(diag(fit_c22$vbeta.ajs)),3),
+	Z = round(fit_c22$beta/sqrt(diag(fit_c22$vbeta.ajs)),3),
+	PVal = round(2-2*pnorm(abs(fit_c22$beta/sqrt(diag(fit_c22$vbeta.ajs)))),3))
+
+
+
+th1 <- data.frame(covariate = h1[,0], estimate = h1[,1], se = h1[,2], p = h1[,4])
+
+th2 <- data.frame(covariate = h2[,0], estimate = h2[,1], se = h2[,2], p = h2[,4])
+
+tc1 <- data.frame(covariate = c1[,0], estimate = c1[,1], se = c1[,2], p = c1[,4])
+
+tc2 <- data.frame(covariate = c2[,0], estimate = c2[,1], se = c2[,2], p = c2[,4])
+
+print(th1)
+print(th2)
+
+print(tc1)
+print(tc2)
+
+```
+
+
+### Pseudovalue - Unstructure correlation structure
+
+```{r}
+
+################## Unstructured correlation structure
+
+
+##### CAUSE 1
+fit_c1 <- geese(pseudo ~ as.factor(tpseudo) + gender, data =b, id=id, jack = TRUE, scale.fix=TRUE, family=gaussian,
+	mean.link = "cloglog", corstr = 'unstructured')
+
+summary(fit_c1)
+
+
+#The results using the AJ variance estimate
+h1 <- cbind(mean = round(fit_c1$beta,4), SD = round(sqrt(diag(fit_c1$vbeta.ajs)),4),
+	Z = round(fit_c1$beta/sqrt(diag(fit_c1$vbeta.ajs)),4),
+	PVal = round(2-2*pnorm(abs(fit_c1$beta/sqrt(diag(fit_c1$vbeta.ajs)))),4))
+
+
+# Logit link
+fit_c12 <- geese(pseudo ~ as.factor(tpseudo) + gender, data =b, id=id, jack = TRUE, scale.fix=TRUE, family=gaussian,
+	mean.link = "logit", corstr="unstructured")
+
+
+#The results using the AJ variance estimate
+h2 <- cbind(mean = round(fit_c12$beta ,4), SD = round(sqrt(diag(fit_c12$vbeta.ajs)),4),
+	Z = round(fit_c12$beta/sqrt(diag(fit_c12$vbeta.ajs)),4),
+	PVal = round(2-2*pnorm(abs(fit_c12$beta/sqrt(diag(fit_c12$vbeta.ajs)))),4))
+
+
+
+
+#### Cause 2
+
+c <- NULL
+for(it in 1:length(pseudo$time)){
+	c <- rbind(c,cbind(data_pseudo,pseudo = pseudo$pseudo$cause2[,it],
+	     tpseudo = pseudo$time[it],id=1:nrow(data_pseudo)))
+}
+c <- c[order(c$id),]
+
+
+fit_c2 <- geese(pseudo ~ as.factor(tpseudo) + gender, data =c, id=id, jack = TRUE, scale.fix=TRUE, family=gaussian,
+	mean.link = "cloglog", corstr="independence")
+
+
+#The results using the AJ variance estimate
+c1 <- cbind(mean = round(fit_c2$beta,3), SD = round(sqrt(diag(fit_c2$vbeta.ajs)),3),
+	Z = round(fit_c2$beta/sqrt(diag(fit_c2$vbeta.ajs)),3),
+	PVal = round(2-2*pnorm(abs(fit_c2$beta/sqrt(diag(fit_c2$vbeta.ajs)))),3))
+
+fit_c22 <- geese(pseudo ~ as.factor(tpseudo) + gender, data =c, id=id, jack = TRUE, scale.fix=TRUE, family=gaussian,
+	mean.link = "logit", corstr="independence")
+
+#The results using the AJ variance estimate
+c2 <- cbind(mean = round(fit_c22$beta,3), SD = round(sqrt(diag(fit_c22$vbeta.ajs)),3),
+	Z = round(fit_c22$beta/sqrt(diag(fit_c22$vbeta.ajs)),3),
+	PVal = round(2-2*pnorm(abs(fit_c22$beta/sqrt(diag(fit_c22$vbeta.ajs)))),3))
+
+
+th1 <- data.frame(covariate = h1[,0], estimate = h1[,1], se = h1[,2], p = h1[,4])
+
+th2 <- data.frame(covariate = h2[,0], estimate = h2[,1], se = h2[,2], p = h2[,4])
+
+tc1 <- data.frame(covariate = c1[,0], estimate = c1[,1], se = c1[,2], p = c1[,4])
+
+tc2 <- data.frame(covariate = c2[,0], estimate = c2[,1], se = c2[,2], p = c2[,4])
+
+
+```
+
+#### Cause 1 Results
+```{r}
+print(th1)
+print(th2)
+
+```
+
+
+#### Cause 2 Results
+```{r}
+print(tc1)
+print(tc2)
+
+
+```
+
+
+
+
+
+
+
+### Pseudovalue approach with 1 time point
+
+```{r}
+#### 1 time point
+
+head(data_pseudo)
+
+
+tpseudo <- 1.99
+
+pseudo1 <- pseudoci(time = data_pseudo$time, event = data_pseudo$epsilon, tmax = tpseudo)
+
+pseudo <- pseudo1$pseudo$cause1
+id = seq(1, 100, 1)
+
+# Cause1
+b1 <- cbind(data_pseudo,pseudo, id)
+
+# fit the model
+mod.t1 <- geese(formula = pseudo ~ gender, data = b1, id = id, family = gaussian, mean.link = 'cloglog', corstr = 'independence')
+
+summary(mod.t1)
+
+mod.t11 <- geese(formula = pseudo ~ gender, data = b1, id = id, family = gaussian, mean.link = 'logit', corstr = 'independence')
+
+summary(mod.t11)
+
+
+
+##### CAUSE 1
+p.fit.1 <- glm(pseudo ~ gender, data=b, family=gaussian)
+#summary(p.fit.1)
+
+
+
+#### CAUSE 2
+
+pseudo2 <- pseudo1$pseudo$cause2
+b2 <- cbind(data_pseudo,pseudo2, id)
+
+mod.t2 <- geese(formula = pseudo2 ~ gender, data = b2, id = id, family = gaussian, mean.link = 'cloglog', corstr = 'independence')
+summary(mod.t2)
+
+mod.t22 <- geese(formula = pseudo2 ~ gender, data = b2, id = id, family = gaussian, mean.link = 'logit', corstr = 'independence')
+summary(mod.t22)
+
+p.fit.2 <- glm(pseudo ~ gender, data=c, family=gaussian)
+#summary(p.fit.2)
+```
+
+
+### Pseudovalue approach with 10 time points
+```{r}
+#### 10 time points
+
+data_pseudo <- data1[data1$epsilon != 0, ]
+data_pseudo <- data_pseudo %>% 
+  mutate(epsilon = as.integer(epsilon))
+
+summary(data_pseudo$epsilon)
+
+
+# Vector of 5-10 evenly spaced time points on the event scale - to find pseudo-values at
+
+# Quantiles
+quantile(data_pseudo$time, probs = c(0.1, 0.2, 0.3,0.4, 0.5, 0.6,0.7,0.8,0.9,1) )
+
+t_pts <- quantile(data_pseudo$time, probs = c(0.1, 0.2, 0.3,0.4, 0.5, 0.6,0.7,0.8,0.9,1) )
+
+data_pseudo <- data1 %>% 
+  mutate(epsilon = as.integer(epsilon))
+
+pseudo <- pseudoci(time = data_pseudo$time, event = data_pseudo$epsilon, tmax = t_pts)
+
+# Cause1
+b <- NULL
+for(it in 1:length(pseudo$time)){
+	b <- rbind(b,cbind(data_pseudo,pseudo = pseudo$pseudo$cause1[,it],
+	     tpseudo = pseudo$time[it],id=1:nrow(data_pseudo)))
+}
+b <- b[order(b$id),]
+
+b$tpseudo <- factor(b$tpseudo)
+
+ggplot(b, aes(x = factor(tpseudo), y = pseudo)) + geom_boxplot()
+
+
+# fit the model
+library(geepack)
+
+
+##### CAUSE 1
+fit_c1 <- geese(pseudo ~ as.factor(tpseudo) + gender, data =b, id=id, jack = TRUE, scale.fix=TRUE, family=gaussian,
+	mean.link = "cloglog", corstr="independence")
+
+
+
+#The results using the AJ variance estimate
+h1 <- cbind(mean = round(fit_c1$beta,4), SD = round(sqrt(diag(fit_c1$vbeta.ajs)),4),
+	Z = round(fit_c1$beta/sqrt(diag(fit_c1$vbeta.ajs)),4),
+	PVal = round(2-2*pnorm(abs(fit_c1$beta/sqrt(diag(fit_c1$vbeta.ajs)))),4))
+
+
+
+
+# Logit link
+fit_c12 <- geese(pseudo ~ as.factor(tpseudo) + gender, data =b, id=id, jack = TRUE, scale.fix=TRUE, family=gaussian,
+	mean.link = "logit", corstr="independence")
+
+
+#The results using the AJ variance estimate
+h2 <- cbind(mean = round(fit_c12$beta ,4), SD = round(sqrt(diag(fit_c12$vbeta.ajs)),4),
+	Z = round(fit_c12$beta/sqrt(diag(fit_c12$vbeta.ajs)),4),
+	PVal = round(2-2*pnorm(abs(fit_c12$beta/sqrt(diag(fit_c12$vbeta.ajs)))),4))
+
+
+
+
+#### Cause 2
+
+c <- NULL
+for(it in 1:length(pseudo$time)){
+	c <- rbind(c,cbind(data_pseudo,pseudo = pseudo$pseudo$cause2[,it],
+	     tpseudo = pseudo$time[it],id=1:nrow(data_pseudo)))
+}
+c <- c[order(c$id),]
+
+
+fit_c2 <- geese(pseudo ~ as.factor(tpseudo) + gender, data =c, id=id, jack = TRUE, scale.fix=TRUE, family=gaussian,
+	mean.link = "cloglog", corstr="independence")
+
+
+#The results using the AJ variance estimate
+c1 <- cbind(mean = round(fit_c2$beta,3), SD = round(sqrt(diag(fit_c2$vbeta.ajs)),3),
+	Z = round(fit_c2$beta/sqrt(diag(fit_c2$vbeta.ajs)),3),
+	PVal = round(2-2*pnorm(abs(fit_c2$beta/sqrt(diag(fit_c2$vbeta.ajs)))),3))
+
+fit_c22 <- geese(pseudo ~ as.factor(tpseudo) + gender, data =c, id=id, jack = TRUE, scale.fix=TRUE, family=gaussian,
+	mean.link = "logit", corstr="independence")
+
+#The results using the AJ variance estimate
+c2 <- cbind(mean = round(fit_c22$beta,3), SD = round(sqrt(diag(fit_c22$vbeta.ajs)),3),
+	Z = round(fit_c22$beta/sqrt(diag(fit_c22$vbeta.ajs)),3),
+	PVal = round(2-2*pnorm(abs(fit_c22$beta/sqrt(diag(fit_c22$vbeta.ajs)))),3))
+
+
+
+th1 <- data.frame(covariate = h1[,0], estimate = h1[,1], se = h1[,2], p = h1[,4])
+
+th2 <- data.frame(covariate = h2[,0], estimate = h2[,1], se = h2[,2], p = h2[,4])
+
+tc1 <- data.frame(covariate = c1[,0], estimate = c1[,1], se = c1[,2], p = c1[,4])
+
+tc2 <- data.frame(covariate = c2[,0], estimate = c2[,1], se = c2[,2], p = c2[,4])
+
+print(th1)
+print(th2)
+
+print(tc1)
+print(tc2)
+```
+
+
+### Pseudovalue approach 100 time points
+
+```{r}
+## 100 time points
+
+
+
+data_pseudo <- data1[data1$epsilon != 0, ]
+data_pseudo <- data_pseudo %>% 
+  mutate(epsilon = as.integer(epsilon))
+
+summary(data_pseudo$epsilon)
+
+
+# Quantiles
+quantile(data_pseudo$time, probs = seq(0,1, 0.01) )
+
+t_pts <-  quantile(data_pseudo$time, probs = seq(0,1, 0.01) )
+
+data_pseudo <- data1 %>% 
+  mutate(epsilon = as.integer(epsilon))
+
+pseudo <- pseudoci(time = data_pseudo$time, event = data_pseudo$epsilon, tmax = t_pts)
+
+# Cause1
+b <- NULL
+for(it in 1:length(pseudo$time)){
+	b <- rbind(b,cbind(data_pseudo,pseudo = pseudo$pseudo$cause1[,it],
+	     tpseudo = pseudo$time[it],id=1:nrow(data_pseudo)))
+}
+b <- b[order(b$id),]
+
+b$tpseudo <- factor(b$tpseudo)
+
+ggplot(b, aes(x = factor(tpseudo), y = pseudo)) + geom_boxplot()
+
+
+# fit the model
+library(geepack)
+
+
+##### CAUSE 1
+fit_c1 <- geese(pseudo ~ as.factor(tpseudo) + gender, data =b, id=id, jack = TRUE, scale.fix=TRUE, family=gaussian,
+	mean.link = "cloglog", corstr="independence")
+
+
+#The results using the AJ variance estimate
+h1 <- cbind(mean = round(fit_c1$beta,4), SD = round(sqrt(diag(fit_c1$vbeta.ajs)),4),
+	Z = round(fit_c1$beta/sqrt(diag(fit_c1$vbeta.ajs)),4),
+	PVal = round(2-2*pnorm(abs(fit_c1$beta/sqrt(diag(fit_c1$vbeta.ajs)))),4))
+
+# Logit link
+fit_c12 <- geese(pseudo ~ as.factor(tpseudo) + gender, data =b, id=id, jack = TRUE, scale.fix=TRUE, family=gaussian,
+	mean.link = "logit", corstr="independence")
+
+
+#The results using the AJ variance estimate
+h2 <- cbind(mean = round(fit_c12$beta ,4), SD = round(sqrt(diag(fit_c12$vbeta.ajs)),4),
+	Z = round(fit_c12$beta/sqrt(diag(fit_c12$vbeta.ajs)),4),
+	PVal = round(2-2*pnorm(abs(fit_c12$beta/sqrt(diag(fit_c12$vbeta.ajs)))),4))
+
+
+
+
+#### Cause 2
+
+c <- NULL
+for(it in 1:length(pseudo$time)){
+	c <- rbind(c,cbind(data_pseudo,pseudo = pseudo$pseudo$cause2[,it],
+	     tpseudo = pseudo$time[it],id=1:nrow(data_pseudo)))
+}
+c <- c[order(c$id),]
+
+
+fit_c2 <- geese(pseudo ~ as.factor(tpseudo) + gender, data =c, id=id, jack = TRUE, scale.fix=TRUE, family=gaussian,
+	mean.link = "cloglog", corstr="independence")
+
+
+#The results using the AJ variance estimate
+c1 <- cbind(mean = round(fit_c2$beta,3), SD = round(sqrt(diag(fit_c2$vbeta.ajs)),3),
+	Z = round(fit_c2$beta/sqrt(diag(fit_c2$vbeta.ajs)),3),
+	PVal = round(2-2*pnorm(abs(fit_c2$beta/sqrt(diag(fit_c2$vbeta.ajs)))),3))
+
+fit_c22 <- geese(pseudo ~ as.factor(tpseudo) + gender, data =c, id=id, jack = TRUE, scale.fix=TRUE, family=gaussian,
+	mean.link = "logit", corstr="independence")
+
+#The results using the AJ variance estimate
+c2 <- cbind(mean = round(fit_c22$beta,3), SD = round(sqrt(diag(fit_c22$vbeta.ajs)),3),
+	Z = round(fit_c22$beta/sqrt(diag(fit_c22$vbeta.ajs)),3),
+	PVal = round(2-2*pnorm(abs(fit_c22$beta/sqrt(diag(fit_c22$vbeta.ajs)))),3))
+
+
+
+th1 <- data.frame(covariate = h1[,0], estimate = h1[,1], se = h1[,2], p = h1[,4])
+
+th2 <- data.frame(covariate = h2[,0], estimate = h2[,1], se = h2[,2], p = h2[,4])
+
+tc1 <- data.frame(covariate = c1[,0], estimate = c1[,1], se = c1[,2], p = c1[,4])
+
+tc2 <- data.frame(covariate = c2[,0], estimate = c2[,1], se = c2[,2], p = c2[,4])
+
+print(th1)
+print(th2)
+
+print(tc1)
+print(tc2)
+```
+
+
+
+
+
+
+## References
+
+[1] H. Putter, "Tutorial in biostatistics: Competing risks and multi-state models Analyses using the mstate package", [Online], May 30, 2014. Available:  http://citeseerx.ist.psu.edu/viewdoc/download?doi=10.1.1.487.3943&rep=rep1&type=pdf 
+
+[2] T. Therneau, "A package for survival analysis in R",[Online], June 12 2020. Available: https://cran.r-project.org/web/packages/survival/vignettes/survival.pdf
+
+
+[3] T. Therneau, C. Crowson, and E. Atkinson, "Multi-state models and competing risks",[Online], June 12 2020. Available: https://cran.r-project.org/web/packages/survival/vignettes/compete.pdf
+
+[4] J. P. Klein, M. Gerster, P. K. Andersen, S. Tarima, and M. P. Perme, "SAS and R functions to compute pseudo-values for censored data regression," Computer Methods and Programs in Biomedicine, vol. 89, no. 3, pp. 289-300, 2007, doi: 10.1016/j.cmpb.2007.11.017.
+
+
