@@ -9,7 +9,7 @@ This repository contains the code to accompany the project 'Investigating method
 
 'Simulation.Rmd' contains the code used to produce the results from the simulation experiments discussed in chapter 4.
 
-
+The two R markdown files were 'knit' to create pdf files of the same names containing the code and output, which are also contained in this repository.
 
 
 References:
